@@ -1,0 +1,6 @@
+./state/
+__pycache__/
+.venv/
+data/
+logs/
+__init__.py
