@@ -108,6 +108,34 @@ def log_progress(stage: str, cur: int, total: int, symbol: str, msg: str):
     pct = (cur / total) * 100 if total else 0
     log(f"[{stage}] ({cur}/{total} | {pct:6.2f}%) {symbol} {msg}")
 
+def infer_exchange_from_prefixed_code(code: str) -> str | None:
+    """code: 'sh600000'/'sz000001'/'bj830001' -> SSE/SZSE/BJSE"""
+    if not isinstance(code, str):
+        return None
+    c = code.strip().lower()
+    if c.startswith("sh"):
+        return "SSE"
+    if c.startswith("sz"):
+        return "SZSE"
+    if c.startswith("bj"):
+        return "BJSE"
+    return None
+
+
+def infer_exchange_from_code6(code6: str) -> str | None:
+    """6 位纯数字 -> SSE/SZSE/BJSE（仅用于补全 exchange 字段）"""
+    if not isinstance(code6, str) or len(code6) != 6 or not code6.isdigit():
+        return None
+    if code6.startswith(("6", "9")):
+        return "SSE"
+    if code6.startswith(("0", "3")):
+        return "SZSE"
+    if code6.startswith("8"):
+        return "BJSE"
+    return None
+
+
+
 
 
 
@@ -255,30 +283,72 @@ def bulk_insert_latest_day_with_spot(latest_trading_date: str, engine) -> bool:
         missing_df = spot_df[spot_df['symbol'].isin(missing_symbols)].copy()
         log(f"发现 {len(missing_symbols)} 只股票在 {latest_trading_date} 缺失，将补齐（含新股）")
 
-        # 字段映射（已按你要求修正）
-        missing_df['trade_date'] = pd.to_datetime(latest_trading_date)
-        missing_df.rename(columns={
-            '最新价': 'close',
-            '涨跌幅': 'chg_pct',
-            '成交量': 'volume',
-            '成交额': 'turnover',   # 成交额 → turnover
-        }, inplace=True)
+                # 字段映射（对齐新版 DDL：amount / turnover_rate 等；尽力从 spot 字段补全）
+        missing_df["trade_date"] = pd.to_datetime(latest_trading_date)
 
-        if 'volume' in missing_df.columns:
-            missing_df['volume'] = missing_df['volume'] * 100
-        if 'chg_pct' in missing_df.columns:
-            missing_df['chg_pct'] = missing_df['chg_pct'] / 100.0
+        # 先补 exchange（基于原始带前缀代码）
+        if "代码" in missing_df.columns:
+            missing_df["exchange"] = missing_df["代码"].apply(infer_exchange_from_prefixed_code)
+        else:
+            missing_df["exchange"] = None
 
-        if '涨跌额' in missing_df.columns and 'close' in missing_df.columns:
-            missing_df['pre_close'] = missing_df['close'] - missing_df['涨跌额']
+        rename_map = {
+            "最新价": "close",
+            "今开": "open",
+            "最高": "high",
+            "最低": "low",
+            "成交量": "volume",
+            "成交额": "amount",
+            "涨跌幅": "chg_pct",
+            "涨跌额": "change",
+            "换手率": "turnover_rate",
+            "振幅": "amplitude",
+            "昨收": "pre_close",  # 前收：入库 + 可用于兜底计算
+        }
+        missing_df.rename(columns=rename_map, inplace=True)
 
-        missing_df['source'] = 'sina'
-        missing_df['window_start'] = pd.to_datetime(latest_trading_date)
-        missing_df['exchange'] = None
+        # 兜底：如没有 pre_close，但有 close/change，可推算
+        if "pre_close" not in missing_df.columns and "close" in missing_df.columns and "change" in missing_df.columns:
+            missing_df["pre_close"] = pd.to_numeric(missing_df["close"], errors="coerce") - pd.to_numeric(missing_df["change"], errors="coerce")
 
-        table_columns = ['symbol', 'trade_date', 'close', 'pre_close', 'chg_pct', 'turnover',
-                         'volume', 'source', 'window_start', 'exchange']
-        insert_df = missing_df[[col for col in table_columns if col in missing_df.columns]]
+        # 兜底：如没有 amplitude，但有 high/low/pre_close，则计算（百分比）
+        if "amplitude" not in missing_df.columns and all(c in missing_df.columns for c in ["high", "low", "pre_close"]):
+            high = pd.to_numeric(missing_df["high"], errors="coerce")
+            low = pd.to_numeric(missing_df["low"], errors="coerce")
+            pre_close = pd.to_numeric(missing_df["pre_close"], errors="coerce")
+            missing_df["amplitude"] = ((high - low) / pre_close * 100).round(4)
+
+        # 数值列转换（注意：按 AKShare 语义保留“百分比”单位，不做 /100）
+        for col in ["open", "close", "high", "low", "volume", "amount", "amplitude", "chg_pct", "change", "turnover_rate"]:
+            if col in missing_df.columns:
+                missing_df[col] = pd.to_numeric(missing_df[col], errors="coerce")
+
+        missing_df["source"] = "ak_spot"
+        missing_df["window_start"] = pd.to_datetime(latest_trading_date)
+
+        table_columns = [
+            "symbol",
+            "trade_date",
+            "open",
+            "close",
+            "pre_close",
+            "high",
+            "low",
+            "volume",
+            "amount",
+            "amplitude",
+            "chg_pct",
+            "change",
+            "turnover_rate",
+            "source",
+            "window_start",
+            "exchange",
+        ]
+        for c in table_columns:
+            if c not in missing_df.columns:
+                missing_df[c] = None
+
+        insert_df = missing_df[table_columns]
 
         inserted_count = len(insert_df)
         #insert_df.to_sql('cn_stock_daily_price', engine, if_exists='append', index=False, method='multi')
@@ -290,7 +360,7 @@ def bulk_insert_latest_day_with_spot(latest_trading_date: str, engine) -> bool:
             chunksize=200,        # 与原代码一致，分批安全插入
         )
         
-        log(f"成功批量插入最新交易日 {latest_trading_date} 缺失记录 {inserted_count} 条（source='em'）")
+        log(f"成功批量插入最新交易日 {latest_trading_date} 缺失记录 {inserted_count} 条（source='ak_spot'）")
         return True
 
     except Exception as e:
@@ -363,7 +433,33 @@ def insert_missing_stock_days(symbol: str, df: pd.DataFrame, missing: Set[date])
 
     df["symbol"] = symbol6
     df["source"] = "eastmoney"
-    df = df[["symbol", "trade_date", "close", "turnover", "pre_close", "chg_pct", "source"]]
+    df["window_start"] = pd.to_datetime(start_date, format="%Y%m%d", errors="coerce") if isinstance(start_date, str) else None
+    df["exchange"] = infer_exchange_from_code6(symbol6)
+
+    table_cols = [
+        "symbol",
+        "trade_date",
+        "open",
+        "close",
+        "pre_close",
+        "high",
+        "low",
+        "volume",
+        "amount",
+        "amplitude",
+        "chg_pct",
+        "change",
+        "turnover_rate",
+        "source",
+        "window_start",
+        "exchange",
+    ]
+    for c in table_cols:
+        if c not in df.columns:
+            df[c] = None
+
+    df = df[table_cols]
+
     try:
         df.to_sql(
             "cn_stock_daily_price",
@@ -376,7 +472,6 @@ def insert_missing_stock_days(symbol: str, df: pd.DataFrame, missing: Set[date])
     except Exception as e:
         print(f"Symbol: {symbol6} to DB failed - {e}")
         raise RuntimeError(e)
-        
 
 def insert_missing_index_days(index_code: str, df: pd.DataFrame, missing: Set[date]) -> int:
     df = df[df["trade_date"].dt.date.isin(missing)].copy()
@@ -385,8 +480,27 @@ def insert_missing_index_days(index_code: str, df: pd.DataFrame, missing: Set[da
 
     df["index_code"] = index_code
     df["source"] = "eastmoney"
-    df = df[["index_code", "trade_date", "close", "turnover", "pre_close", "chg_pct", "source"]]
-    try: 
+
+    table_cols = [
+        "index_code",
+        "trade_date",
+        "open",
+        "close",
+        "high",
+        "low",
+        "volume",
+        "amount",
+        "source",
+        "pre_close",
+        "chg_pct",
+    ]
+    for c in table_cols:
+        if c not in df.columns:
+            df[c] = None
+
+    df = df[table_cols]
+
+    try:
         df.to_sql(
             "cn_index_daily_price",
             engine,
@@ -398,11 +512,6 @@ def insert_missing_index_days(index_code: str, df: pd.DataFrame, missing: Set[da
     except Exception as e:
         print(f"idx: {index_code} to DB failed - {e}")
         raise RuntimeError(e)
-
-# =====================================================
-
-
-
 
 def load_symbols_from_json() -> set:
     """从 data/symbols.json 加载股票列表"""

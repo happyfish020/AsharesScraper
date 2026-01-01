@@ -52,29 +52,16 @@ def load_stock_price_eastmoney(
     start_date: str,
     end_date: str,
     adjust: str = "qfq",
-) -> pd.DataFrame:
+) -> pd.DataFrame | None:
     """
-    使用东财接口拉取 A 股股票日线行情
-
-    Parameters
-    ----------
-    stock_code : str
-        推荐传 6 位股票代码（如 "000001"）
-        也兼容 "000001.SZ" / "sz000001" / "600000.SH" 等
-    start_date : str
-        YYYYMMDD
-    end_date : str
-        YYYYMMDD
-    adjust : str
-        qfq / hfq / None
+    使用东财接口拉取 A 股股票日线行情（AKShare: stock_zh_a_hist）
 
     Returns
     -------
-    DataFrame columns:
-        trade_date | close |turnover |chg_pct
+    DataFrame columns（英文列名对齐 DB DDL / AK 返回语义）:
+        trade_date, open, close, high, low,
+        volume, amount, amplitude, chg_pct, change, turnover_rate, pre_close
     """
-    #code6 = normalize_stock_code(stock_code)
-
     df = ak.stock_zh_a_hist(
         symbol=stock_code,
         period="daily",
@@ -86,29 +73,62 @@ def load_stock_price_eastmoney(
     if df is None or df.empty:
         return None
 
-    df = df.rename(columns={"日期": "trade_date", "收盘": "close",  "成交额": "turnover" ,"涨跌幅": "chg_pct"})
-    df["trade_date"] = pd.to_datetime(df["trade_date"])
-    df["close"] = pd.to_numeric(df["close"], errors="coerce")
-    
-    df["turnover"] = pd.to_numeric(df["turnover"], errors="coerce")
-    df["chg_pct"] = pd.to_numeric(df["chg_pct"], errors="coerce")
-    df = df.dropna(subset=["trade_date", "close", "turnover", "chg_pct"])
+    rename_map = {
+        "日期": "trade_date",
+        "开盘": "open",
+        "收盘": "close",
+        "最高": "high",
+        "最低": "low",
+        "成交量": "volume",
+        "成交额": "amount",
+        "振幅": "amplitude",
+        "涨跌幅": "chg_pct",
+        "涨跌额": "change",
+        "换手率": "turnover_rate",
+    }
+    df = df.rename(columns=rename_map)
 
-    # ===== 2️⃣ 时间排序（非常重要）=====
-    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
+
+    for col in [
+        "open",
+        "close",
+        "pre_close",
+        "high",
+        "low",
+        "volume",
+        "amount",
+        "amplitude",
+        "chg_pct",
+        "change",
+        "turnover_rate",
+        "pre_close",
+    ]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna(subset=["trade_date", "close"]).copy()
     df = df.sort_values("trade_date").reset_index(drop=True)
 
-    # ===== 3️⃣ 补 pre_close（上一交易日 close）=====
-    df["pre_close"] = df["close"].shift(1)
+    keep_cols = [
+        "trade_date",
+        "open",
+        "close",
+        "pre_close",
+        "high",
+        "low",
+        "volume",
+        "amount",
+        "amplitude",
+        "chg_pct",
+        "change",
+        "turnover_rate",
+    ]
+    for c in keep_cols:
+        if c not in df.columns:
+            df[c] = None
 
-    return df[["trade_date", "close", "turnover","pre_close", "chg_pct"]]
- 
-
-
-
-# =====================================================
-# 指数（日线）- 东财（保持）
-# =====================================================
+    return df[keep_cols]
 
 def load_index_price_em(
     index_code: str,
@@ -116,12 +136,15 @@ def load_index_price_em(
     end_date: str,
 ) -> pd.DataFrame | None:
     """
-    指数行情（日线，东财）
-    index_code 例：
-      "sh000300", "sh000001", "sz399006"
+    指数行情（日线，东财；AKShare: stock_zh_index_daily_em）
 
-    新增：对 ak.stock_zh_index_daily_em 调用增加 3 次重试机制
-          每次失败 sleep(2)，三次均失败后抛出 RuntimeError
+    AK 返回列（英文）:
+        date, open, close, high, low, volume, amount
+
+    DB DDL 对齐（并保留兼容列）:
+        trade_date, open, close, high, low, volume, amount, pre_close, chg_pct
+
+    新增：3 次重试机制
     """
     if not isinstance(index_code, str) or not index_code.strip():
         raise ValueError("index_code must be non-empty str")
@@ -138,35 +161,42 @@ def load_index_price_em(
             if df is None or df.empty:
                 return None
 
-            # ===== 1️⃣ 列名标准化 & 类型转换 =====
-            df = df.rename(columns={"date": "trade_date", "close": "close", "amount": "turnover"})
-            
-            df["trade_date"] = pd.to_datetime(df["trade_date"])
-            df["close"] = pd.to_numeric(df["close"], errors="coerce")
-            df["turnover"] = pd.to_numeric(df["turnover"], errors="coerce")
-            
-            df = df.dropna(subset=["trade_date", "close", "turnover"])
+            df = df.rename(columns={"date": "trade_date"})
 
-            # ===== 2️⃣ 时间排序（非常重要）=====
+            df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
+            for col in ["open", "close", "high", "low", "volume", "amount"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+
+            df = df.dropna(subset=["trade_date", "close"]).copy()
             df = df.sort_values("trade_date").reset_index(drop=True)
 
-            # ===== 3️⃣ 补 pre_close & 计算 chg_pct =====
             df["pre_close"] = df["close"].shift(1)
-            df["chg_pct"] = (
-                (df["close"] - df["pre_close"]) / df["pre_close"] * 100
-            ).round(4)
-
-            # 第一行无前收盘价，设为 None（便于后续过滤）
+            df["chg_pct"] = ((df["close"] - df["pre_close"]) / df["pre_close"] * 100).round(4)
             df.loc[0, ["pre_close", "chg_pct"]] = None, None
 
-            return df[["trade_date", "close", "turnover", "pre_close", "chg_pct"]]
+            keep_cols = [
+                "trade_date",
+                "open",
+                "close",
+                "high",
+                "low",
+                "volume",
+                "amount",
+                "pre_close",
+                "chg_pct",
+            ]
+            for c in keep_cols:
+                if c not in df.columns:
+                    df[c] = None
+            return df[keep_cols]
 
         except Exception as e:
             if attempt == max_retries:
                 raise RuntimeError(
                     f"获取指数 {index_code} 日线数据失败（已重试 {max_retries} 次）：{str(e)}"
                 ) from e
-            else:
-                time.sleep(2)  # 每次重试前等待 2 秒
+            time.sleep(2)
 
-    return None  # 理论上不会走到这里
+    return None
+
