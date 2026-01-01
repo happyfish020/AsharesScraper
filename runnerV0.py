@@ -51,8 +51,6 @@ INDEX_SYMBOLS = [
     "sh000300",
     "sh000001",
     "sz399006",
-    "sh000688",
-    "sh000905",  # 中证500
 ]
 BASE_INDEX = "sh000300"
 
@@ -444,7 +442,9 @@ def run_stock_loader():
 
     log(f"[START][STOCK] window={start_date}~{end_date}")
 
-    is_continue_load = True
+    scanned = load_state(SCANNED_FILE)
+    failed = load_state(FAILED_FILE)
+
     if MANUAL_STOCK_SYMBOLS:
         work_symbols = set(MANUAL_STOCK_SYMBOLS)
         log(f"[CONFIG][STOCK] manual symbols = {len(work_symbols)}")
@@ -457,25 +457,10 @@ def run_stock_loader():
         
             work_symbols = set(load_universe().keys())
             log(f"[CONFIG][STOCK] universe symbols = {len(work_symbols)}")
-    
-    load_symbols_days(work_symbols =work_symbols , start_date=start_date , end_date=end_date, is_continue_load=is_continue_load)
 
-    #end def 
-
-def load_symbols_days(work_symbols: list, start_date:str, end_date: str, is_continue_load:bool=False):
+       
     total = len(work_symbols)
     processed = 0
-
-    
-    scanned = {}
-    failed = {}
-
-
-    if is_continue_load:
-        scanned = load_state(SCANNED_FILE)
-        failed = load_state(FAILED_FILE)
-
-
     log(f"[START][STOCK] window={start_date}~{end_date} ,检查 窗口内是否缺失 ，若缺失再拉")
     ##
     for i, symbol in enumerate(sorted(work_symbols), start=1):
@@ -627,8 +612,8 @@ def run_data_pipeline():
     with engine.begin() as conn:
         create_tables_if_not_exists(conn)
 
-    run_stock_loader()   # 1️⃣ 拉股票
-    run_index_loader()   # 2️⃣ 拉指数
+    #run_stock_loader()   # 1️⃣ 拉股票
+    #run_index_loader()   # 2️⃣ 拉指数
     is_missing_list = run_full_coverage_audit(engine=engine, 
                             start_date=start_date, 
                             end_date=end_date,
@@ -636,8 +621,8 @@ def run_data_pipeline():
                             index_codes=INDEX_SYMBOLS
                             )
     if len(is_missing_list):
+
         pass
-        #load_symbols_days(work_symbols =is_missing_list , start_date=start_date , end_date=end_date, is_continue_load=False)
 
       
 

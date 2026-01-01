@@ -2,5 +2,7 @@
 __pycache__/
 .venv/
 data/
+stat/
 logs/
+audit_reports/
 __init__.py

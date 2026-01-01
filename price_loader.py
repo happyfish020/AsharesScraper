@@ -1,7 +1,7 @@
 import re
 import akshare as ak
 import pandas as pd
-
+import time
 
 def normalize_stock_code(stock_code: str) -> str:
     """
@@ -114,40 +114,59 @@ def load_index_price_em(
     index_code: str,
     start_date: str,
     end_date: str,
-) -> pd.DataFrame:
+) -> pd.DataFrame | None:
     """
     指数行情（日线，东财）
     index_code 例：
       "sh000300", "sh000001", "sz399006"
+
+    新增：对 ak.stock_zh_index_daily_em 调用增加 3 次重试机制
+          每次失败 sleep(2)，三次均失败后抛出 RuntimeError
     """
     if not isinstance(index_code, str) or not index_code.strip():
         raise ValueError("index_code must be non-empty str")
 
-    df = ak.stock_zh_index_daily_em(
-        symbol=index_code,
-        start_date=start_date,
-        end_date=end_date,
-    )
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            df = ak.stock_zh_index_daily_em(
+                symbol=index_code,
+                start_date=start_date,
+                end_date=end_date,
+            )
 
-    if df is None or df.empty:
-        return None
+            if df is None or df.empty:
+                return None
 
-    df = df.rename(columns={"date": "trade_date", "close": "close", "turnover": "turnover", "chg_pct": "chg_pct" })
-     
-    df["trade_date"] = pd.to_datetime(df["trade_date"])
-    df["close"] = pd.to_numeric(df["close"], errors="coerce")
-    
-    df["turnover"] = pd.to_numeric(df["turnover"], errors="coerce")
-    df["chg_pct"] = pd.to_numeric(df["chg_pct"], errors="coerce")
-    df = df.dropna(subset=["trade_date", "close", "turnover", "chg_pct"])
+            # ===== 1️⃣ 列名标准化 & 类型转换 =====
+            df = df.rename(columns={"date": "trade_date", "close": "close", "amount": "turnover"})
+            
+            df["trade_date"] = pd.to_datetime(df["trade_date"])
+            df["close"] = pd.to_numeric(df["close"], errors="coerce")
+            df["turnover"] = pd.to_numeric(df["turnover"], errors="coerce")
+            
+            df = df.dropna(subset=["trade_date", "close", "turnover"])
 
+            # ===== 2️⃣ 时间排序（非常重要）=====
+            df = df.sort_values("trade_date").reset_index(drop=True)
 
-    # ===== 2️⃣ 时间排序（非常重要）=====
-    df["trade_date"] = pd.to_datetime(df["trade_date"])
-    df = df.sort_values("trade_date").reset_index(drop=True)
+            # ===== 3️⃣ 补 pre_close & 计算 chg_pct =====
+            df["pre_close"] = df["close"].shift(1)
+            df["chg_pct"] = (
+                (df["close"] - df["pre_close"]) / df["pre_close"] * 100
+            ).round(4)
 
-    # ===== 3️⃣ 补 pre_close（上一交易日 close）=====
-    df["pre_close"] = df["close"].shift(1)
-    
+            # 第一行无前收盘价，设为 None（便于后续过滤）
+            df.loc[0, ["pre_close", "chg_pct"]] = None, None
 
-    return df[["trade_date", "close", "turnover","pre_close", "chg_pct"]]
+            return df[["trade_date", "close", "turnover", "pre_close", "chg_pct"]]
+
+        except Exception as e:
+            if attempt == max_retries:
+                raise RuntimeError(
+                    f"获取指数 {index_code} 日线数据失败（已重试 {max_retries} 次）：{str(e)}"
+                ) from e
+            else:
+                time.sleep(2)  # 每次重试前等待 2 秒
+
+    return None  # 理论上不会走到这里

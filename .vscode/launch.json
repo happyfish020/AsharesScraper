@@ -11,8 +11,9 @@
             "program": "runner.py",
             "console": "integratedTerminal",
             "args": [
-                "--refresh"
-                
+               // "--refresh"
+                "--days",
+                "240"
             ],
         }
     ]
