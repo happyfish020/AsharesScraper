@@ -103,13 +103,14 @@ def load_stock_price_eastmoney(
         "change",
         "turnover_rate",
         "pre_close",
+        
     ]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df = df.dropna(subset=["trade_date", "close"]).copy()
     df = df.sort_values("trade_date").reset_index(drop=True)
-
+    
     keep_cols = [
         "trade_date",
         "open",
@@ -123,6 +124,7 @@ def load_stock_price_eastmoney(
         "chg_pct",
         "change",
         "turnover_rate",
+    
     ]
     for c in keep_cols:
         if c not in df.columns:

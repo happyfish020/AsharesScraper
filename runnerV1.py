@@ -296,7 +296,6 @@ def bulk_insert_latest_day_with_spot(latest_trading_date: str, engine) -> bool:
             missing_df["exchange"] = None
 
         rename_map = {
-            '名称': 'name',
             "最新价": "close",
             "今开": "open",
             "最高": "high",
@@ -347,7 +346,6 @@ def bulk_insert_latest_day_with_spot(latest_trading_date: str, engine) -> bool:
             "source",
             "window_start",
             "exchange",
-            "name"
         ]
         for c in table_columns:
             if c not in missing_df.columns:
@@ -459,7 +457,6 @@ def insert_missing_stock_days(symbol: str, df: pd.DataFrame, missing: Set[date])
         "source",
         "window_start",
         "exchange",
-        "name",
     ]
     for c in table_cols:
         if c not in df.columns:
@@ -520,57 +517,7 @@ def insert_missing_index_days(index_code: str, df: pd.DataFrame, missing: Set[da
         print(f"idx: {index_code} to DB failed - {e}")
         raise RuntimeError(e)
 
-def load_symbols_from_json():
-    """
-    原函数：从 JSON 文件加载股票列表
-    新实现：从数据库 CN_STOCK_DAILY_PRICE 表查询每个 symbol 的最后一条交易日记录
-             返回 set[(stock_name, symbol)] 
-             - 如果能关联到名称（可扩展），否则 name = symbol
-             - 当前因无 name 字段，暂时使用 symbol 作为 name（后续可 join 其他表）
-    """
-    print(f"[{datetime.now()}] 从数据库加载股票代码列表（基于最新交易日）...")
-
-    try:
-        from oracle_utils import get_engine
-        
-        engine = get_engine()
-        sql = """
-        SELECT DISTINCT SYMBOL, NAME,
-               FIRST_VALUE(SYMBOL) OVER (PARTITION BY SYMBOL ORDER BY TRADE_DATE DESC) AS STOCK_NAME_TEMP
-        FROM (
-            SELECT SYMBOL, TRADE_DATE,NAME
-            FROM cn_stock_daily_price
-            WHERE TRADE_DATE = (
-                SELECT MAX(TRADE_DATE) 
-                FROM cn_stock_daily_price sd 
-                WHERE sd.SYMBOL = cn_stock_daily_price.SYMBOL
-            )
-        )
-        """
-
-        with engine.connect() as conn:
-            result = conn.execute(text(sql))
-            symbols_set = set()
-            
-            for row in result:
-                symbol = row[0].strip() if row[0] else None
-                
-                name = row[1].strip() if row[1] else None  
-                
-                if symbol:
-                    symbols_set.add((name, symbol))
-            
-            print(f"[{datetime.now()}] 从数据库加载到 {len(symbols_set)} 只股票")
-            return symbols_set
-
-    except Exception as e:
-        print(f"错误: 从数据库加载股票列表失败: {e}")
-        print(" fallback: 返回空集合")
-        return set()
-    
-
-    
-def load_symbols_from_json_1() -> set:
+def load_symbols_from_json() -> set:
     """从 data/symbols.json 加载股票列表"""
     symbols_path = Path("data/symbols.json")
     if not symbols_path.exists():
@@ -616,31 +563,19 @@ def run_stock_loader():
         log(f"[CONFIG][STOCK] manual symbols = {len(work_symbols)}")
     else:
         
-        work_symbols_set = load_symbols_from_json()
-        work_symbols_list = list(work_symbols_set)
-
-        if not work_symbols_list:
+        work_symbols = load_symbols_from_json()
+        if not work_symbols:
             log("无可用股票列表，可能 data/symbols.json 未生成，退化为原有逻辑或跳过")
               ### 可选择 return 或继续原有 universe_loader 逻辑作为兜底
-            #raise Exception("read CN_SECURITY_MASTER for all symbols")
+            raise Exception("read CN_SECURITY_MASTER for all symbols")
             #work_symbols = set(load_universe().keys())
             #log(f"[CONFIG][STOCK] universe symbols = {len(work_symbols)}")
             # read CN_SECURITY_MASTER for all symbols
-    load_symbols_days(work_symbols =work_symbols_list , start_date=start_date , end_date=end_date, is_continue_load=is_continue_load)
+    load_symbols_days(work_symbols =work_symbols , start_date=start_date , end_date=end_date, is_continue_load=is_continue_load)
 
     #end def 
 
 def load_symbols_days(work_symbols: list, start_date:str, end_date: str, is_continue_load:bool=False):
-    
-    if work_symbols and isinstance(work_symbols[0], tuple):
-        # 有 name 的情况
-        symbol_list = [sym for name, sym in work_symbols]
-        name_map = {sym: name for name, sym in work_symbols}
-    else:
-        # 只有 symbol 的情况
-        symbol_list = work_symbols
-        name_map = {sym: sym for sym in symbol_list}  # name fallback to symbol
-    
     total = len(work_symbols)
     processed = 0
 
@@ -656,12 +591,11 @@ def load_symbols_days(work_symbols: list, start_date:str, end_date: str, is_cont
 
     log(f"[START][STOCK] window={start_date}~{end_date} ,检查 窗口内是否缺失 ，若缺失再拉")
     ##
-    #for i, symbol in enumerate(sorted(work_symbols), start=1):
-    for i, (name, symbol) in enumerate(sorted(work_symbols), start=1):
-
+    for i, symbol in enumerate(sorted(work_symbols), start=1):
+    
         # ===== 0️⃣ 统一 symbol → 6 位 DB 主键 =====
         symbol6 = normalize_stock_code(symbol)
-        print(f"正在处理第 {i} 只：{symbol6} - {name}")   # ← 可以直接用
+    
         # ===== 1️⃣ 断点再续检查（注意：scanned / failed 用原始 symbol）=====
         if symbol in scanned:
             log_progress("STOCK", i, total, symbol, "SKIP scanned")
@@ -684,9 +618,7 @@ def load_symbols_days(work_symbols: list, start_date:str, end_date: str, is_cont
                 stock_code=symbol6,
                 start_date=start_date,
                 end_date=end_date,
-              #  name = name, <================ todo
             )
-            
             if df is None or df.empty:
                 raise RuntimeError("empty eastmoney data")
     
@@ -705,7 +637,7 @@ def load_symbols_days(work_symbols: list, start_date:str, end_date: str, is_cont
                 "STOCK", i, total, symbol,
                 f"INSERT missing_days={len(missing)}"
             )
-            df['name'] = name # add name  
+    
             inserted = insert_missing_stock_days(symbol6, df, missing)
     
             # ===== 6️⃣ 再校验（⚠️ 用 stock_trade_days，不再用指数交易日）=====
@@ -734,7 +666,7 @@ def load_symbols_days(work_symbols: list, start_date:str, end_date: str, is_cont
             log_progress("STOCK", i, total, symbol, f"FAILED {e}")
     
         # ===== 8️⃣ 状态文件 checkpoint（每 N 个）=====
-            processed += 1
+        processed += 1
         if processed % STATE_FLUSH_EVERY == 0:
             save_state(SCANNED_FILE, scanned)
             save_state(FAILED_FILE, failed)
@@ -1105,5 +1037,5 @@ def main():
     log("本次运行完成")
 
 if __name__ == '__main__':
-    #get_hot_rank_em()
-    main()
+    get_hot_rank_em()
+    #main()

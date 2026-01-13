@@ -8,7 +8,7 @@
             "name": "Python Debugger: Current File",
             "type": "debugpy",
             "request": "launch",
-            "program": "runner.py",
+            "program": "runner.py" ,//"ak_sector_defined.py",//"ak_security_master.py"  , // "runner.py",
             "console": "integratedTerminal",
             "args": [
                // "--refresh"

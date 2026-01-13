@@ -1,4 +1,4 @@
-from sqlalchemy import text
+from sqlalchemy import create_engine, text, inspect
 import pandas as pd
 
 # =====================================================
@@ -117,3 +117,23 @@ def create_tables_if_not_exists(conn):
     # Index 表暂不自动补列
     conn.commit()
 
+DB_USER = "secopr"
+DB_PASSWORD = "secopr"
+DB_HOST = "localhost"
+DB_PORT = "1521"
+DB_SERVICE = "xe"
+SCHEMA_NAME = "SECOPR"
+
+
+
+DSN = f"{DB_HOST}:{DB_PORT}/{DB_SERVICE}"
+CONNECTION_STRING = f"oracle+oracledb://{DB_USER}:{DB_PASSWORD}@{DSN}"
+ 
+def get_engine():
+
+    engine = create_engine(
+        CONNECTION_STRING,
+        pool_pre_ping=True,
+        future=True,
+    )
+    return engine
