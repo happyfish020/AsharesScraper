@@ -12,8 +12,8 @@
             "console": "integratedTerminal",
             "args": [
                // "--refresh"
-                "--days",
-                "240"
+               // "--days",
+               // "240"
             ],
         }
     ]

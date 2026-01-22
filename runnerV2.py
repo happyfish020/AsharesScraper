@@ -27,7 +27,6 @@ import baostock as bs
 import pandas as pd
 import akshare as ak
  
-from ak_fut_index_daily import load_index_futures_daily
 from price_loader import (
     load_stock_price_eastmoney,
     load_index_price_em,
@@ -36,7 +35,7 @@ from price_loader import (
 #from universe_loader import load_universe
 from oracle_utils import create_tables_if_not_exists
 from coverage_audit import run_full_coverage_audit
-from ak_fund_etf_spot_em import load_fund_etf_hist_em,  load_spot_as_hist_today
+from ak_fund_etf_spot_em import load_fund_etf_spot_em
 
 # =====================================================
 # ====================== CONFIG =======================
@@ -811,28 +810,17 @@ def run_data_pipeline():
         create_tables_if_not_exists(conn)
     
 
-    load_index_futures_daily(start_date=start_date, end_date=end_date)
-    #sys.exit(0)
-    if look_back_days > 1:
-        load_fund_etf_hist_em(start_date=start_date, end_date=end_date, adjust="qfq")
-    else:
-        load_spot_as_hist_today()
-
-        
-    #load_fund_etf_hist_em(start_date=start_date, end_date=end_date, adjust="qfq")
-    #sys.exit()
+    load_fund_etf_spot_em()
+    sys.exit()
     run_stock_loader()   # 1️⃣ 拉股票
     run_index_loader()   # 2️⃣ 拉指数
-
-
-
     is_missing_list = run_full_coverage_audit(engine=engine, 
                             start_date=start_date, 
                             end_date=end_date,
                             stock_symbols=None,
                             index_codes=INDEX_SYMBOLS
                             )
-    if len(is_missing_list) ==0 :
+    if len(is_missing_list):
         pass
         #load_symbols_days(work_symbols =is_missing_list , start_date=start_date , end_date=end_date, is_continue_load=False)
 
