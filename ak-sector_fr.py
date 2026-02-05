@@ -5,6 +5,10 @@ import random
 from sqlalchemy import create_engine, text, inspect
 import akshare as ak
 
+from logger import setup_logging, get_logger
+LOG = get_logger("Main")
+
+
 # 数据库连接配置（全局常量，建议移到配置文件）
 DB_CONFIG = {
     'user': "secopr",
@@ -32,16 +36,16 @@ def create_table_if_not_exists(engine, table_name: str, create_sql: str, indexes
     full_table = f"{SCHEMA_NAME}.{table_name}"
     
     if not inspector.has_table(table_name, schema=SCHEMA_NAME):
-        print(f"创建表: {full_table}")
+        LOG.info(f"创建表: {full_table}")
         with engine.connect() as conn:
             conn.execute(text(create_sql))
             if indexes:
                 for idx_sql in indexes:
                     conn.execute(text(idx_sql))
             conn.commit()
-        print(f"表 {full_table} 创建成功")
+        LOG.info(f"表 {full_table} 创建成功")
     else:
-        print(f"表 {full_table} 已存在，跳过创建")
+        LOG.info(f"表 {full_table} 已存在，跳过创建")
 
 
 def get_exchange(code: str) -> str:
@@ -102,7 +106,7 @@ def collect_and_save_a_stock_basic():
             )
         conn.commit()
     
-    print(f"[A股基础信息] 插入完成：{len(records)} 条")
+    LOG.info(f"[A股基础信息] 插入完成：{len(records)} 条")
 
 
 def collect_and_save_hot_rank():
@@ -164,7 +168,7 @@ def collect_and_save_hot_rank():
             )
         conn.commit()
     
-    print(f"[热度排名] 插入完成：{len(records)} 条")
+    LOG.info(f"[热度排名] 插入完成：{len(records)} 条")
 
 
 # 示例：其他功能函数的框架（可继续扩展）
@@ -196,7 +200,7 @@ if __name__ == "__main__":
     # ... 其他表创建 ...
     
     today = date.today()
-    print(f"采集日期: {today}\n")
+    LOG.info(f"采集日期: {today}\n")
     
     # 按需调用各个功能
     collect_and_save_a_stock_basic()
@@ -210,4 +214,4 @@ if __name__ == "__main__":
     # collect_board_constituents('industry', sleep_base=10, max_boards=50)
     # collect_board_constituents('concept', sleep_base=12)
     
-    print("\n所有指定采集任务完成")
+    LOG.info("\n所有指定采集任务完成")

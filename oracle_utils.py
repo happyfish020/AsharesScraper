@@ -1,6 +1,11 @@
 from sqlalchemy import create_engine, text, inspect
 import pandas as pd
 
+from logger import setup_logging, get_logger
+LOG = get_logger("Main")
+
+
+
 # =====================================================
 # 新版 Table DDLs（纯英文列名，完全匹配 AKShare 返回字段）
 # =====================================================
@@ -88,7 +93,7 @@ def ensure_column(conn, table_name: str, column_name: str, column_ddl: str):
     """
     if column_exists(conn, table_name, column_name):
         return
-    print(f"[DB] Altering table add column: {table_name}.{column_name}")
+    LOG.info(f"[DB] Altering table add column: {table_name}.{column_name}")
     conn.execute(text(f"ALTER TABLE {table_name} ADD {column_name} {column_ddl}"))
 
 
@@ -99,9 +104,9 @@ def create_tables_if_not_exists(conn):
     """
     for table, ddl in TABLE_DDLS.items():
         if table_exists(conn, table):
-            print(f"[DB] Table exists, skip creation: {table}")
+            LOG.info(f"[DB] Table exists, skip creation: {table}")
             continue
-        print(f"[DB] Creating table: {table}")
+        LOG.info(f"[DB] Creating table: {table}")
         conn.execute(text(ddl))
         conn.commit()  # 建表后立即提交
 

@@ -13,12 +13,23 @@ AsharesScraper
 - 本项目不是 UnifiedRisk
 - 不计算因子 / 不做回测
 """
-
+import subprocess
+import sys
+import ctypes
+ 
+import random
+import re
 import os, sys
 import json
+import time 
 from pathlib import Path
-from datetime import datetime, timedelta, time,date
+from datetime import  datetime, timedelta, date, time as dt_time
 from sqlalchemy import create_engine, text, inspect
+
+import numpy as np
+
+ 
+
 
 from typing import Set
 import argparse
@@ -26,8 +37,10 @@ import pytz
 import baostock as bs
 import pandas as pd
 import akshare as ak
- 
+from logger import setup_logging, get_logger
+
 from ak_fut_index_daily import load_index_futures_daily
+from ak_option_sse_daily_sina import load_option_sse_daily
 from price_loader import (
     load_stock_price_eastmoney,
     load_index_price_em,
@@ -36,7 +49,8 @@ from price_loader import (
 #from universe_loader import load_universe
 from oracle_utils import create_tables_if_not_exists
 from coverage_audit import run_full_coverage_audit
-from ak_fund_etf_spot_em import load_fund_etf_hist_em,  load_spot_as_hist_today
+from ak_fund_etf_spot_em import load_fund_etf_hist_baostock, load_fund_etf_hist_em,  load_spot_as_hist_today
+from wireguard_helper import activate_tunnel, deactivate_tunnel, switch_wire_guard, toggle_vpn
 
 # =====================================================
 # ====================== CONFIG =======================
@@ -50,11 +64,14 @@ MANUAL_STOCK_SYMBOLS = []   # 非空则只跑这些，否则跑 universe
 
 # -------- 指数 --------
 INDEX_SYMBOLS = [
-    "sh000300",
+    "sz399001",
     "sh000001",
     "sz399006",
-    "sh000688",
-    "sh000905",  # 中证500
+    #"sh000688", # kc500 000688
+    "sh000300", #沪深 300 指数 #hs300
+    "sh000905",  # 中证500 , 中证 500（CSI 500） zz500
+    "sh000016", # 上证 50（SSE 50）
+    "sh000852", # 中证 1000（CSI 1000）
 ]
 BASE_INDEX = "sh000300"
 
@@ -62,7 +79,7 @@ BASE_INDEX = "sh000300"
 STATE_DIR = "state"
 SCANNED_FILE = os.path.join(STATE_DIR, "scanned.json")
 FAILED_FILE = os.path.join(STATE_DIR, "failed.json")
-STATE_FLUSH_EVERY = 30
+STATE_FLUSH_EVERY = 3
 
 # -------- 审计输出 --------
 AUDIT_OUTPUT_DIR = "audit_reports"
@@ -98,20 +115,14 @@ FAILED_STATE = "state/failed.json"
 # ==================== WINDOW =========================
 # =====================================================
 
-
-
-
 # =====================================================
 # ==================== UTIL ===========================
 # =====================================================
 
-def log(msg: str):
-    print(msg, flush=True)
-
-
+ 
 def log_progress(stage: str, cur: int, total: int, symbol: str, msg: str):
     pct = (cur / total) * 100 if total else 0
-    log(f"[{stage}] ({cur}/{total} | {pct:6.2f}%) {symbol} {msg}")
+    LOG.info(f"[{stage}] ({cur}/{total} | {pct:6.2f}%) {symbol} {msg}")
 
 def infer_exchange_from_prefixed_code(code: str) -> str | None:
     """code: 'sh600000'/'sz000001'/'bj830001' -> SSE/SZSE/BJSE"""
@@ -153,14 +164,12 @@ def clear_state_files():
     for path in [SCANNED_FILE, FAILED_FILE]:
         if os.path.exists(path):
             os.remove(path)
-            print(f"[REFRESH] removed {path}")
+            LOG.info(f"[REFRESH] removed {path}")
         else:
-            print(f"[REFRESH] not found, skip {path}")
+            LOG.info(f"[REFRESH] not found, skip {path}")
 
 # ==================== 日志函数 ====================
-def log(msg: str):
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
-
+ 
 def parse_args():
     parser = argparse.ArgumentParser(description="AsharesScraper - A股数据加载器")
     parser.add_argument("--refresh", action="store_true", help="清空状态文件，从头开始抓取")
@@ -188,7 +197,7 @@ def get_intraday_status_and_last_trade_date() -> tuple[bool, str]:
         (is_intraday: bool, last_trade_date: str)
     """
     tz = pytz.timezone('Asia/Shanghai')
-    now = datetime.now(tz)
+    now =  datetime.now(tz)
 
     if now.hour < 8:
         reference_date = (now - timedelta(days=1)).date()
@@ -197,9 +206,9 @@ def get_intraday_status_and_last_trade_date() -> tuple[bool, str]:
 
     lg = bs.login()
     if lg.error_code != '0':
-        log(f"baostock login failed: {lg.error_msg}")
+        LOG.info(f"baostock login failed: {lg.error_msg}")
         is_weekend = reference_date.weekday() >= 5
-        in_session = time(9, 30) <= now.time() < time(15, 0)
+        in_session = dt_time(9, 30) <= now.time() < dt_time(15, 0)
         fallback_last_date = reference_date - timedelta(days=(reference_date.weekday() + 2) % 7 if is_weekend else 0)
         return (not is_weekend and in_session, fallback_last_date.strftime('%Y-%m-%d'))
 
@@ -227,7 +236,7 @@ def get_intraday_status_and_last_trade_date() -> tuple[bool, str]:
         last_trade_date_str = last_trade_date_obj.strftime('%Y-%m-%d')
 
         is_today_trading_day = last_trade_date_obj == now.date()
-        in_trading_hours = time(9, 30) <= now.time() < time(15, 0)
+        in_trading_hours = dt_time(9, 30) <= now.time() < dt_time(15, 0)
 
         # todo  if T h < 9:30 how spot data looks like ??
         is_intraday = is_today_trading_day and in_trading_hours
@@ -235,9 +244,10 @@ def get_intraday_status_and_last_trade_date() -> tuple[bool, str]:
         return is_intraday, last_trade_date_str
 
     except Exception as e:
-        log(f"Error in get_intraday_status_and_last_trade_date: {e}")
+        LOG.info(f"Error in get_intraday_status_and_last_trade_date: {e}")
         is_weekend = reference_date.weekday() >= 5
-        in_session = time(9, 30) <= now.time() < time(15, 0)
+        
+        in_session = dt_time(9, 30) <= now.time() < dt_time(15, 0)
         fallback_last = reference_date - timedelta(days=(reference_date.weekday() - 4) % 7)
         return (not is_weekend and in_session, fallback_last.strftime('%Y-%m-%d'))
 
@@ -251,7 +261,7 @@ def bulk_insert_latest_day_with_spot(latest_trading_date: str, engine) -> bool:
  
         spot_df = ak.stock_zh_a_spot()
         if spot_df.empty:
-            log("ak.stock_zh_a_spot() 返回空数据，批量补齐失败")
+            LOG.info("ak.stock_zh_a_spot() 返回空数据，批量补齐失败")
             return False
 
         # 过滤北交所 + 统一代码
@@ -259,7 +269,7 @@ def bulk_insert_latest_day_with_spot(latest_trading_date: str, engine) -> bool:
         spot_df['symbol'] = spot_df['代码'].str.slice(start=2)
 
         if spot_df.empty:
-            log("过滤北交所后无有效股票数据")
+            LOG.info("过滤北交所后无有效股票数据")
             return False
 
         # === 新增：保存所有 symbol 到 data/symbols.json ===
@@ -268,7 +278,7 @@ def bulk_insert_latest_day_with_spot(latest_trading_date: str, engine) -> bool:
         symbols_path.parent.mkdir(parents=True, exist_ok=True)  # 自动创建 data 目录
         with open(symbols_path, 'w', encoding='utf-8') as f:
             json.dump(symbols, f, ensure_ascii=False, indent=2)
-        log(f"已更新全市场股票列表 data/symbols.json，共 {len(symbols)} 只股票")
+        LOG.info(f"已更新全市场股票列表 data/symbols.json，共 {len(symbols)} 只股票")
 
         # 以 spot 返回的 symbol 作为全量目标集合
         all_symbols = set(symbols)
@@ -281,12 +291,12 @@ def bulk_insert_latest_day_with_spot(latest_trading_date: str, engine) -> bool:
         # 计算缺失
         missing_symbols = all_symbols - existing_symbols
         if not missing_symbols:
-            log(f"最新交易日 {latest_trading_date} 已全部存在（基于全行情快照），无需补齐")
+            LOG.info(f"最新交易日 {latest_trading_date} 已全部存在（基于全行情快照），无需补齐")
             return True
 
         # 提取缺失股票数据
         missing_df = spot_df[spot_df['symbol'].isin(missing_symbols)].copy()
-        log(f"发现 {len(missing_symbols)} 只股票在 {latest_trading_date} 缺失，将补齐（含新股）")
+        LOG.info(f"发现 {len(missing_symbols)} 只股票在 {latest_trading_date} 缺失，将补齐（含新股）")
 
                 # 字段映射（对齐新版 DDL：amount / turnover_rate 等；尽力从 spot 字段补全）
         missing_df["trade_date"] = pd.to_datetime(latest_trading_date)
@@ -367,11 +377,11 @@ def bulk_insert_latest_day_with_spot(latest_trading_date: str, engine) -> bool:
             chunksize=200,        # 与原代码一致，分批安全插入
         )
         
-        log(f"成功批量插入最新交易日 {latest_trading_date} 缺失记录 {inserted_count} 条（source='ak_spot'）")
+        LOG.info(f"成功批量插入最新交易日 {latest_trading_date} 缺失记录 {inserted_count} 条（source='ak_spot'）")
         return True
 
     except Exception as e:
-        log(f"批量补齐最新交易日失败: {str(e)}")
+        LOG.info(f"批量补齐最新交易日失败: {str(e)}")
         return False
 
 # =====================================================
@@ -440,7 +450,7 @@ def insert_missing_stock_days(symbol: str, df: pd.DataFrame, missing: Set[date])
     symbol6 = normalize_stock_code(symbol)
 
     df["symbol"] = symbol6
-    df["source"] = "eastmoney"
+    #df["source"] = "eastmoney"
     df["window_start"] = pd.to_datetime(start_date, format="%Y%m%d", errors="coerce") if isinstance(start_date, str) else None
     df["exchange"] = infer_exchange_from_code6(symbol6)
 
@@ -469,6 +479,18 @@ def insert_missing_stock_days(symbol: str, df: pd.DataFrame, missing: Set[date])
 
     df = df[table_cols]
 
+
+    numeric_cols = [
+        'open', 'close', 'pre_close', 'high', 'low',
+        'volume', 'amount',
+        'amplitude', 'chg_pct', 'change', 'turnover_rate'
+    ]
+    
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = df[col].apply(
+                lambda x: None if pd.isna(x) else f"{float(x):.10g}"   # .10g 通用格式，避免多余0
+            ) 
     try:
         df.to_sql(
             "cn_stock_daily_price",
@@ -479,7 +501,7 @@ def insert_missing_stock_days(symbol: str, df: pd.DataFrame, missing: Set[date])
         )
         return len(df)
     except Exception as e:
-        print(f"Symbol: {symbol6} to DB failed - {e}")
+        LOG.info(f"Symbol: {symbol6} to DB failed - {e}")
         raise RuntimeError(e)
 
 def insert_missing_index_days(index_code: str, df: pd.DataFrame, missing: Set[date]) -> int:
@@ -519,7 +541,7 @@ def insert_missing_index_days(index_code: str, df: pd.DataFrame, missing: Set[da
         )
         return len(df)
     except Exception as e:
-        print(f"idx: {index_code} to DB failed - {e}")
+        LOG.info(f"idx: {index_code} to DB failed - {e}")
         raise RuntimeError(e)
 
 def load_symbols_from_json():
@@ -530,7 +552,7 @@ def load_symbols_from_json():
              - 如果能关联到名称（可扩展），否则 name = symbol
              - 当前因无 name 字段，暂时使用 symbol 作为 name（后续可 join 其他表）
     """
-    print(f"[{datetime.now()}] 从数据库加载股票代码列表（基于最新交易日）...")
+    LOG.info(f"[{datetime.now()}] 从数据库加载股票代码列表（基于最新交易日）...")
 
     try:
         from oracle_utils import get_engine
@@ -562,12 +584,12 @@ def load_symbols_from_json():
                 if symbol:
                     symbols_set.add((name, symbol))
             
-            print(f"[{datetime.now()}] 从数据库加载到 {len(symbols_set)} 只股票")
+            LOG.info(f"[{datetime.now()}] 从数据库加载到 {len(symbols_set)} 只股票")
             return symbols_set
 
     except Exception as e:
-        print(f"错误: 从数据库加载股票列表失败: {e}")
-        print(" fallback: 返回空集合")
+        LOG.info(f"错误: 从数据库加载股票列表失败: {e}")
+        LOG.info(" fallback: 返回空集合")
         return set()
     
 
@@ -576,11 +598,11 @@ def load_symbols_from_json_1() -> set:
     """从 data/symbols.json 加载股票列表"""
     symbols_path = Path("data/symbols.json")
     if not symbols_path.exists():
-        log("警告: data/symbols.json 不存在，将尝试通过 spot 接口生成（仅当 days=1 时有效）")
+        LOG.info("警告: data/symbols.json 不存在，将尝试通过 spot 接口生成（仅当 days=1 时有效）")
         return set()  # 空集，后续会走失败回退逻辑
     with open(symbols_path, 'r', encoding='utf-8') as f:
         symbols = json.load(f)
-    log(f"从 data/symbols.json 加载股票列表，共 {len(symbols)} 只")
+    LOG.info(f"从 data/symbols.json 加载股票列表，共 {len(symbols)} 只")
     return set(symbols)
 
 
@@ -592,47 +614,48 @@ def run_stock_loader():
     global look_back_days
 
  
-    if look_back_days == 1:
+    if look_back_days ==1:
         is_intraday, latest_trading_date = get_intraday_status_and_last_trade_date()
         if not is_intraday:
-            log(f"检测到盘后时间，使用 ak.stock_zh_a_spot() 批量补齐最新交易日 {latest_trading_date}")
+            LOG.info(f"检测到盘后时间，使用 ak.stock_zh_a_spot() 批量补齐最新交易日 {latest_trading_date}")
             if bulk_insert_latest_day_with_spot(latest_trading_date, engine):
-                log(f"最新交易日 {latest_trading_date} 已批量补齐，跳过个股逐只拉取")
+                LOG.info(f"最新交易日 {latest_trading_date} 已批量补齐，跳过个股逐只拉取")
                 return
             else:
-                log("全行情快照批量补齐失败，回退到原有逐只拉取逻辑")
+                LOG.info("全行情快照批量补齐失败，回退到原有逐只拉取逻辑")
         else:
-            log("当前为盘中时间，无法使用收盘快照，执行原有逐只拉取逻辑")
+            LOG.info("当前为盘中时间，无法使用收盘快照，执行原有逐只拉取逻辑")
         
-        log("[DONE][STOCK] 全行情快照批量 loader finished")
-        #return 
+        LOG.info("[DONE][STOCK] 全行情快照批量 loader finished")
+        return 
 
     #look_back_days = 7 
     ############
-
-    log(f"[START][STOCK] window={start_date}~{end_date}")
-
-    is_continue_load = True
-    if MANUAL_STOCK_SYMBOLS:
-        work_symbols = set(MANUAL_STOCK_SYMBOLS)
-        log(f"[CONFIG][STOCK] manual symbols = {len(work_symbols)}")
     else:
-        
-        work_symbols_set = load_symbols_from_json()
-        work_symbols_list = list(work_symbols_set)
+        LOG.info(f"[START][STOCK] window={start_date}~{end_date}")
+    
+        is_continue_load = True
+        if MANUAL_STOCK_SYMBOLS:
+            work_symbols = set(MANUAL_STOCK_SYMBOLS)
+            LOG.info(f"[CONFIG][STOCK] manual symbols = {len(work_symbols)}")
+        else:
+            
+            #work_symbols_set = load_symbols_from_json()
+            #work_symbols_list = list(work_symbols_set)
+    
+            #if not work_symbols_list:
+            #    LOG.info("无可用股票列表，可能 data/symbols.json 未生成，退化为原有逻辑或跳过")
+                  ### 可选择 return 或继续原有 universe_loader 逻辑作为兜底
+                #raise Exception("read CN_SECURITY_MASTER for all symbols")
+                #work_symbols = set(load_universe().keys())
+                #LOG.info(f"[CONFIG][STOCK] universe symbols = {len(work_symbols)}")
+                # read CN_SECURITY_MASTER for all symbols
+            work_symbols_list=  get_all_symbols_from_spot()
+        load_symbols_days(work_symbols =work_symbols_list , start_date=start_date , end_date=end_date, is_continue_load=is_continue_load)
+    
+        #end def 
 
-        if not work_symbols_list:
-            log("无可用股票列表，可能 data/symbols.json 未生成，退化为原有逻辑或跳过")
-              ### 可选择 return 或继续原有 universe_loader 逻辑作为兜底
-            #raise Exception("read CN_SECURITY_MASTER for all symbols")
-            #work_symbols = set(load_universe().keys())
-            #log(f"[CONFIG][STOCK] universe symbols = {len(work_symbols)}")
-            # read CN_SECURITY_MASTER for all symbols
-    load_symbols_days(work_symbols =work_symbols_list , start_date=start_date , end_date=end_date, is_continue_load=is_continue_load)
-
-    #end def 
-
-def load_symbols_days(work_symbols: list, start_date:str, end_date: str, is_continue_load:bool=False):
+def load_symbols_days_no(work_symbols: list, start_date:str, end_date: str, is_continue_load:bool=False):
     
     if work_symbols and isinstance(work_symbols[0], tuple):
         # 有 name 的情况
@@ -656,14 +679,21 @@ def load_symbols_days(work_symbols: list, start_date:str, end_date: str, is_cont
         failed = load_state(FAILED_FILE)
 
 
-    log(f"[START][STOCK] window={start_date}~{end_date} ,检查 窗口内是否缺失 ，若缺失再拉")
+    LOG.info(f"[START][STOCK] window={start_date}~{end_date} ,检查 窗口内是否缺失 ，若缺失再拉")
     ##
     #for i, symbol in enumerate(sorted(work_symbols), start=1):
+    processed = 0
     for i, (name, symbol) in enumerate(sorted(work_symbols), start=1):
-
+        processed += 1
+        if processed % STATE_FLUSH_EVERY == 0:
+            save_state(SCANNED_FILE, scanned)
+            save_state(FAILED_FILE, failed)
+            LOG.info(f"[STATE] flushed scanned/failed at {processed}")
+        
+        
         # ===== 0️⃣ 统一 symbol → 6 位 DB 主键 =====
         symbol6 = normalize_stock_code(symbol)
-        print(f"正在处理第 {i} 只：{symbol6} - {name}")   # ← 可以直接用
+        LOG.info(f"正在处理第 {processed } 只：{symbol6} - {name}")   # ← 可以直接用
         # ===== 1️⃣ 断点再续检查（注意：scanned / failed 用原始 symbol）=====
         if symbol in scanned:
             log_progress("STOCK", i, total, symbol, "SKIP scanned")
@@ -680,13 +710,14 @@ def load_symbols_days(work_symbols: list, start_date:str, end_date: str, is_cont
             existing_days = get_existing_stock_days(symbol6)
     
             # ===== 3️⃣ 拉东财数据（作为“该股可交易日事实源”）=====
-            import time
             #time.sleep(1)
+            time.sleep(random.uniform(0.5, 1))
+             
             df = load_stock_price_eastmoney(
                 stock_code=symbol6,
                 start_date=start_date,
                 end_date=end_date,
-              #  name = name, <================ todo
+                name = name, # <================ todo
             )
             
             if df is None or df.empty:
@@ -733,40 +764,402 @@ def load_symbols_days(work_symbols: list, start_date:str, end_date: str, is_cont
     
         except Exception as e:
             failed.add(symbol)
+            
+            LOG.info(e)
+            
+            
+            switch_wire_guard("cn")
             log_progress("STOCK", i, total, symbol, f"FAILED {e}")
     
         # ===== 8️⃣ 状态文件 checkpoint（每 N 个）=====
-            processed += 1
+        
+        
+    save_state(SCANNED_FILE, scanned)
+    save_state(FAILED_FILE, failed)
+    LOG.info("[DONE][STOCK] loader finished")
+
+
+
+
+# ==================== baostock 单只核心函数（无 login/logout） ====================
+def _load_stock_price_baostock_internal(
+    stock_code: str, start_date: str, end_date: str, name: str, adjust: str = "qfq"
+) -> pd.DataFrame | None:
+    """纯内部调用，不负责登录登出"""
+    code_clean = str(stock_code).strip()
+    if len(code_clean) != 6 or not code_clean.isdigit():
+        return None
+
+    # 前缀转换
+    if code_clean.startswith(('6', '68', '69')):
+        symbol = f"sh.{code_clean}"
+    elif code_clean.startswith(('0', '3')):
+        symbol = f"sz.{code_clean}"
+    elif code_clean.startswith(('4', '8')):
+        symbol = f"bj.{code_clean}"
+    else:
+        return None
+
+    adjust_map = {"qfq": "2", "hfq": "3", "": "1", None: "1"}
+    adjustflag = adjust_map.get(adjust, "1")
+
+    fields = "date,code,open,high,low,close,preclose,volume,amount,turn,pctChg"
+
+    def to_baostock_date(d: str) -> str:
+        d = d.strip().replace("-", "")
+        if len(d) != 8 or not d.isdigit():
+            raise ValueError(f"无效日期格式: {d}")
+        return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+
+    try:
+        
+  
+        rs = bs.query_history_k_data_plus(
+            code=symbol,
+            fields=fields,
+            start_date=to_baostock_date(start_date),
+            end_date=to_baostock_date(end_date),
+            frequency="d",
+            adjustflag=adjustflag
+        )
+        if rs.error_code != '0' or rs.data is None:
+            return None
+
+        df = rs.get_data()
+        if df.empty:
+            return None
+
+        # 重命名 + 数值转换（与原 eastmoney 完全对齐）
+        rename_map = {
+            'date': 'trade_date',
+            'open': 'open', 'high': 'high', 'low': 'low', 'close': 'close',
+            'preclose': 'pre_close',
+            'volume': 'volume', 'amount': 'amount',
+            'turn': 'turnover_rate',
+            'pctChg': 'chg_pct_raw',
+        }
+
+        df = df.rename(columns=rename_map)
+        # ─── 关键修复：转换为 datetime ───
+        df['trade_date'] = pd.to_datetime(df['trade_date'], errors='coerce')
+
+        numeric_cols = ['open', 'high', 'low', 'close', 'pre_close', 'volume', 'amount', 'turnover_rate', 'chg_pct_raw']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        # 衍生字段计算（与原函数完全一致）
+        df = df.sort_values("trade_date").reset_index(drop=True)
+        df['amplitude'] = ((df['high'] - df['low']) / df['pre_close'] * 100).where(df['pre_close'] != 0, np.nan)
+        df['change'] = df['close'] - df['pre_close']
+        df['chg_pct'] = ((df['close'] - df['pre_close']) / df['pre_close'] * 100).round(4)
+        df.loc[0, ['pre_close', 'change', 'chg_pct', 'amplitude']] = None, None, None, None
+
+        df['name'] = name
+
+        keep_cols = [
+            "trade_date", "name", "open", "close", "high", "low",
+            "volume", "amount", "amplitude", "chg_pct", "change",
+            "turnover_rate", "pre_close"
+        ]
+        for c in keep_cols:
+            if c not in df.columns:
+                df[c] = None
+        df = df[keep_cols].dropna(subset=["trade_date", "close"]).copy()
+        df = df.replace([np.nan, np.inf, -np.inf], None)
+        df["source"] = "batstock"
+        return df
+
+    except Exception as e:
+        LOG.error( f"Exception:{e} - Symbol:{stock_code} , Name:{name}")
+        #raise e
+        return None
+
+
+# ==================== 带 failover 的统一入口 ====================
+def load_stock_price_with_failover(
+    stock_code: str, start_date: str, end_date: str, name: str, adjust: str = "qfq"
+) -> pd.DataFrame | None:
+    """对外统一接口：baostock 主 → eastmoney failover"""
+    # 1. 先试 baostock
+    df = _load_stock_price_baostock_internal(stock_code, start_date, end_date, name, adjust)
+    if df is not None and not df.empty:
+        return df
+
+    # 2. failover 到 akshare
+    LOG.warning(f"baostock failed for {stock_code}, switching to eastmoney")
+    return load_stock_price_eastmoney(
+        stock_code=stock_code,
+        start_date=start_date,
+        end_date=end_date,
+        name=name,
+        adjust=adjust
+    )
+
+def load_symbols_days(work_symbols: list, start_date:str, end_date: str, is_continue_load:bool=False):
+    
+    lg = bs.login() 
+    if lg.error_code != '0':
+        LOG.error(f"baostock login failed: {lg.error_msg}")
+        # 可以选择直接 return 或继续用 akshare
+    else:
+        LOG.info("baostock login success (global for this batch)")
+
+    if work_symbols and isinstance(work_symbols[0], tuple):
+        # 有 name 的情况
+        symbol_list = [sym for name, sym in work_symbols]
+        name_map = {sym: name for name, sym in work_symbols}
+    else:
+        # 只有 symbol 的情况
+        symbol_list = work_symbols
+        name_map = {sym: sym for sym in symbol_list}  # name fallback to symbol
+    
+    total = len(work_symbols)
+    processed = 0
+
+    
+    scanned = {}
+    failed = {}
+
+
+    if is_continue_load:
+        scanned = load_state(SCANNED_FILE)
+        failed = load_state(FAILED_FILE)
+
+
+    LOG.info(f"[START][STOCK] window={start_date}~{end_date} ,检查 窗口内是否缺失 ，若缺失再拉")
+    ##
+    #for i, symbol in enumerate(sorted(work_symbols), start=1):
+    processed = 0
+    for i, (name, symbol) in enumerate(sorted(work_symbols), start=1):
+        processed += 1
         if processed % STATE_FLUSH_EVERY == 0:
             save_state(SCANNED_FILE, scanned)
             save_state(FAILED_FILE, failed)
-            log(f"[STATE] flushed scanned/failed at {processed}")
+            LOG.info(f"[STATE] flushed scanned/failed at {processed}")
+        
+        
+        # ===== 0️⃣ 统一 symbol → 6 位 DB 主键 =====
+        symbol6 = normalize_stock_code(symbol)
+        LOG.info(f"正在处理第 {processed } 只：{symbol6} - {name}")   # ← 可以直接用
+        # ===== 1️⃣ 断点再续检查（注意：scanned / failed 用原始 symbol）=====
+        if symbol in scanned:
+            log_progress("STOCK", i, total, symbol, "SKIP scanned")
+            continue
     
-    ##
+        if symbol in failed:
+            log_progress("STOCK", i, total, symbol, "SKIP failed")
+            continue
+    
+        log_progress("STOCK", i, total, symbol, "CHECK DB coverage")
+    
+        try:
+            # ===== 2️⃣ 先取 DB 中已有的交易日 =====
+            existing_days = get_existing_stock_days(symbol6)
+    
+            # ========== 关键替换：使用带 failover 的函数 ==========
+            df = load_stock_price_with_failover(
+                stock_code=symbol6,
+                start_date=start_date,
+                end_date=end_date,
+                name=name,
+                adjust="qfq"   # 你原来用的参数，可改
+            ) 
+            
+            if df is None or df.empty:
+                raise RuntimeError("empty data from both baostock and eastmoney")
+
+            #stock_trade_days = set(df["trade_date"].dt.date.tolist())
+            stock_trade_days = set(df["trade_date"].dt.date.unique())
+            missing = stock_trade_days - existing_days
+
+            if not missing:
+                scanned.add(symbol)   # 注意：你原来是 scanned.add，但 scanned 是 dict？建议改成 set
+                log_progress("STOCK", i, total, symbol, "OK already complete")
+                continue
+
+            log_progress("STOCK", i, total, symbol, f"INSERT missing_days={len(missing)}")
+            df['name'] = name
+            inserted = insert_missing_stock_days(symbol6, df, missing)
+
+            remaining = stock_trade_days - get_existing_stock_days(symbol6)
+            if remaining:
+                raise RuntimeError(f"still missing {len(remaining)} trade days")
+
+            scanned.add(symbol)
+            log_progress("STOCK", i, total, symbol, f"FIXED inserted={inserted}")
+
+        except Exception as e:
+            failed.add(symbol)
+            LOG.info(f"FAILED {symbol}: {e}")
+            switch_wire_guard("cn")
+            log_progress("STOCK", i, total, symbol, f"FAILED {e}")
+
+        # ==================== 每 20 只 sleep 1 秒 ====================
+        if processed % 20 == 0:
+            LOG.info(f"Processed {processed} stocks, sleeping 1s to respect baostock rate limit...")
+            time.sleep(1.0)
+        else:
+            # 保留你原来的随机小延时（可选）
+            time.sleep(random.uniform(0.3, 0.8))
+
+    # ==================== 结束登出 ====================
+    bs.logout()
+    LOG.info("baostock logout")
+
     save_state(SCANNED_FILE, scanned)
     save_state(FAILED_FILE, failed)
-    log("[DONE][STOCK] loader finished")
-
+    LOG.info("[DONE][STOCK] loader finished") 
 # =====================================================
+def load_index_price_with_failover(
+    index_code: str,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame | None:
+    """主函数：baostock → eastmoney failover"""
+    # 先试 baostock
+    df = _load_index_price_baostock_internal(index_code, start_date, end_date)
+    if df is not None and not df.empty:
+        return df
+
+    # failover
+    LOG.warning(f"baostock failed for index {index_code}, switching to eastmoney")
+    return load_index_price_em(  # 原函数保留，作为备用
+        index_code=index_code,
+        start_date=start_date,
+        end_date=end_date,
+    )
+ 
+
+def _load_index_price_baostock_internal(
+    index_code: str,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame | None:
+    """baostock 单次查询（不负责 login/logout）"""
+    code_clean = str(index_code).strip()
+    
+    # 自动加前缀（常见指数规则）
+    if code_clean.startswith(('0', '3')):
+        symbol = f"sz.{code_clean}"
+    elif code_clean.startswith(('0', '8', '9')):  # 上证、深证、国债等
+        symbol = f"sh.{code_clean}"
+    else:
+        # 如果已经带前缀，直接用
+        if '.' in code_clean and len(code_clean.split('.')[1]) == 6:
+            symbol = code_clean
+        elif code_clean.startswith(('sz', 'sh')) and len(code_clean ) == 8:
+            symbol = code_clean.replace("sz","sz.").replace("sh","sh.")
+
+    # 日期转 YYYY-MM-DD
+    def to_bs_date(d: str) -> str:
+        d = d.replace("-", "").strip()
+        if len(d) == 8 and d.isdigit():
+            return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+        return d  # 如果已经是 YYYY-MM-DD，直接返回
+
+    start_dt = to_bs_date(start_date)
+    end_dt = to_bs_date(end_date)
+
+    fields = "date,code,open,high,low,close,preclose,volume,amount,turn,pctChg"
+
+    try:
+        rs = bs.query_history_k_data_plus(
+            code=symbol,
+            fields=fields,
+            start_date=start_dt,
+            end_date=end_dt,
+            frequency="d",
+            adjustflag="1"  # 指数一般不复权
+        )
+
+        if rs.error_code != '0':
+            return None
+
+        df = rs.get_data()
+        if df.empty:
+            return None
+
+        # 重命名 + 类型转换
+        rename_map = {
+            'date': 'trade_date',
+            'open': 'open',
+            'high': 'high',
+            'low': 'low',
+            'close': 'close',
+            'preclose': 'pre_close',
+            'volume': 'volume',
+            'amount': 'amount',
+            'turn': 'turnover_rate',     # baostock 有 turn，但原函数无，可选保留
+            'pctChg': 'chg_pct_raw',
+        }
+        df = df.rename(columns=rename_map)
+
+        # 日期转 datetime
+        df['trade_date'] = pd.to_datetime(df['trade_date'], errors='coerce')
+        df = df.dropna(subset=['trade_date', 'close'])
+
+        # 数值转换
+        numeric_cols = ['open', 'close', 'high', 'low', 'pre_close', 'volume', 'amount']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        # 计算衍生字段（与原函数一致）
+        df = df.sort_values("trade_date").reset_index(drop=True)
+        df["pre_close"] = df["close"].shift(1)
+        df["chg_pct"] = ((df["close"] - df["pre_close"]) / df["pre_close"] * 100).round(4)
+        df.loc[0, ["pre_close", "chg_pct"]] = None, None
+
+        # 保持列一致（原函数无 turnover_rate，但 baostock 有，可选加）
+        keep_cols = [
+            "trade_date", "open", "close", "high", "low",
+            "volume", "amount", "pre_close", "chg_pct"
+        ]
+        for c in keep_cols:
+            if c not in df.columns:
+                df[c] = None
+
+        df = df[keep_cols].copy()
+        df = df.replace([np.nan, np.inf, -np.inf], None)
+
+        return df
+
+    except Exception as e:
+        LOG.warning(f"index_code:{symbol}, e:{e}")
+        return None
+
 # ================= 2️⃣ INDEX LOADER ==================
 # =====================================================
 
 def run_index_loader():
-    log(f"[START][INDEX] window={start_date}~{end_date}")
+    LOG.info(f"[START][INDEX] window={start_date}~{end_date}")
+
+    # baostock 全局登录一次
+    lg = bs.login()
+    if lg.error_code != '0':
+        LOG.error(f"baostock login failed: {lg.error_msg}")
+        # 可以选择继续用 eastmoney，或直接退出
+    else:
+        LOG.info("baostock login success (global for index batch)")
+
+    LOG.info(f"[START][INDEX] window={start_date}~{end_date}")
 
     total = len(INDEX_SYMBOLS)
-
+    processed = 0 
     for i, idx in enumerate(INDEX_SYMBOLS, start=1):
+        processed = processed +1
         log_progress("INDEX", i, total, idx, "CHECK DB coverage")
         #symbol6 = normalize_stock_code()
         try:
             existing = get_existing_index_days(idx)
-
-            df = load_index_price_em(
+            # 使用带 failover 的函数
+            df = load_index_price_with_failover(
                 index_code=idx,
                 start_date=start_date,
                 end_date=end_date,
             )
+             
             if df is None or df.empty:
                 raise RuntimeError("empty index data")
 
@@ -787,9 +1180,21 @@ def run_index_loader():
 
         except Exception as e:
             log_progress("INDEX", i, total, idx, f"FAILED {e}")
-            raise e
+            # 可以选择 raise 或 continue，根据你的容错需求
 
-    log("[DONE][INDEX] loader finished")
+        # 频率控制（指数数量少，10个一休）
+        if processed % 10 == 0:
+            LOG.info(f"Processed {processed} indices, sleeping 1s...")
+            time.sleep(1.0)
+        else:
+            time.sleep(0.3)  # 小间隔防限流
+
+    # 结束登出
+    bs.logout()
+    LOG.info("baostock logout")
+    LOG.info("[DONE][INDEX] loader finished")
+ 
+    LOG.info("[DONE][INDEX] loader finished")
 
 # =====================================================
 # ================= 3️⃣ STOCK AUDIT ===================
@@ -805,25 +1210,33 @@ def run_index_loader():
 # =====================================================
 
 def run_data_pipeline():
-    log("[START] AsharesScraper")
+    LOG.info("[START] AsharesScraper")
 
     with engine.begin() as conn:
         create_tables_if_not_exists(conn)
     
-
-    load_index_futures_daily(start_date=start_date, end_date=end_date)
-    #sys.exit(0)
-    if look_back_days > 1:
-        load_fund_etf_hist_em(start_date=start_date, end_date=end_date, adjust="qfq")
+    run_stock_loader()   # 1️⃣ 拉股票 
+    
+    if look_back_days >1:
+        load_fund_etf_hist_baostock(start_date=start_date, end_date=end_date)
+        LOG.info("[DONE] load_fund_etf_hist_em finished")
     else:
         load_spot_as_hist_today()
-
-        
-    #load_fund_etf_hist_em(start_date=start_date, end_date=end_date, adjust="qfq")
-    #sys.exit()
-    run_stock_loader()   # 1️⃣ 拉股票
+        LOG.info("[DONE] load_spot_as_hist_today finished")
+    LOG.info("[DONE] run_stock_loader finished")
+    
     run_index_loader()   # 2️⃣ 拉指数
+    LOG.info("[DONE] run_index_loader finished")
+    LOG.info("[DONE] load_spot_as_hist_today finished")
 
+    load_index_futures_daily(start_date=start_date, end_date=end_date)    
+    LOG.info("[DONE] load_index_futures_daily finished")
+    #load_fund_etf_hist_em(start_date=start_date, end_date=end_date, adjust="qfq")
+    
+
+   
+    #
+    load_option_sse_daily()
 
 
     is_missing_list = run_full_coverage_audit(engine=engine, 
@@ -832,13 +1245,13 @@ def run_data_pipeline():
                             stock_symbols=None,
                             index_codes=INDEX_SYMBOLS
                             )
-    if len(is_missing_list) ==0 :
-        pass
+    #if len(is_missing_list) ==0 :
+    #    pass
         #load_symbols_days(work_symbols =is_missing_list , start_date=start_date , end_date=end_date, is_continue_load=False)
 
       
 
-    log("[DONE] AsharesScraper finished")
+    LOG.info("[DONE] AsharesScraper finished")
 
 
 ######################################################
@@ -865,7 +1278,7 @@ def create_table_if_not_exists(table_name: str, create_sql: str, indexes: list =
     inspector = inspect(engine)
     
     if not inspector.has_table(table_name, schema=SCHEMA_NAME):
-        print(f"表 {SCHEMA_NAME}.{table_name} 不存在，正在创建...")
+        LOG.info(f"表 {SCHEMA_NAME}.{table_name} 不存在，正在创建...")
         
         with engine.connect() as conn:
             conn.execute(text(create_sql))
@@ -876,9 +1289,9 @@ def create_table_if_not_exists(table_name: str, create_sql: str, indexes: list =
                     conn.execute(text(idx_sql))
             
             conn.commit()
-        print(f"表 {table_name} 创建完成")
+        LOG.info(f"表 {table_name} 创建完成")
     else:
-        print(f"表 {SCHEMA_NAME}.{table_name} 已存在，跳过创建")
+        LOG.info(f"表 {SCHEMA_NAME}.{table_name} 已存在，跳过创建")
 
 
 #
@@ -915,20 +1328,20 @@ def get_hot_rank_em():
     # ==============================
     #     创建热度排行表（如果不存在）
     # ==============================
-    print("\n=== 检查并创建股票热度排行表 ===")
+    LOG.info("\n=== 检查并创建股票热度排行表 ===")
     create_table_if_not_exists(HOT_RANK_TABLE, hot_rank_create_sql, hot_rank_indexes)
 
     # ==============================
     #     采集 & 插入 股票热度排行（人气榜）
     # ==============================
-    print("\n=== 采集东方财富股票热度排行（前100名） ===")
+    LOG.info("\n=== 采集东方财富股票热度排行（前100名） ===")
 
     try:
         df_hot = ak.stock_hot_rank_em()
-        print(f"获取热度排行：{len(df_hot)} 条记录")
+        LOG.info(f"获取热度排行：{len(df_hot)} 条记录")
 
         if df_hot is None or df_hot.empty:
-            print("热度排行数据为空，跳过插入")
+            LOG.info("热度排行数据为空，跳过插入")
             return
 
         # --- 字段映射（保持原逻辑）---
@@ -1066,10 +1479,10 @@ def get_hot_rank_em():
 
             conn.commit()
 
-        print(f"股票热度排行插入完成：{len(records_hot)} 条（日期：{today}）")
+        LOG.info(f"股票热度排行插入完成：{len(records_hot)} 条（日期：{today}）")
 
     except Exception as e:
-        print("采集或插入股票热度排行失败:", str(e))
+        LOG.info("采集或插入股票热度排行失败:", str(e))
 
     # 可选：简单验证（保持原逻辑）
     try:
@@ -1078,14 +1491,86 @@ def get_hot_rank_em():
                 text(f"SELECT COUNT(*) FROM {SCHEMA_NAME}.{HOT_RANK_TABLE} WHERE ASOF_DATE = :dt"),
                 {"dt": today}
             ).scalar()
-            print(f"验证：当天热度排行记录数 = {count}")
+            LOG.info(f"验证：当天热度排行记录数 = {count}")
     except Exception as e:
-        print("验证查询失败:", str(e))
+        LOG.info("验证查询失败:", str(e))
 
-    print("\n=== 股票热度排行采集任务完成 ===")
+    LOG.info("\n=== 股票热度排行采集任务完成 ===")
 
+def get_all_symbols_from_spot(use_cache: bool = True) -> list[tuple[str, str]]:
+    """
+    从 ak.stock_zh_a_spot() 获取当前全市场可交易 A 股符号列表
+    返回格式：list[(name: str, symbol: str)]，例如 [("平安银行", "000001"), ...]
+    
+    - 过滤掉北交所（代码以 bj 开头）
+    - symbol 统一为 6 位纯数字
+    - 按 symbol 排序返回
+    - 支持缓存（data/all_symbols_with_name.json）
+    """
+    cache_file = Path("data/all_symbols_with_name.json")
+    
+    if use_cache and cache_file.exists():
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # 兼容旧缓存（如果是纯 list[str]，自动转换）
+            if isinstance(data, list) and all(isinstance(x, str) for x in data):
+                LOG.info("旧缓存格式（纯 symbol），重新拉取")
+            else:
+                symbols_list = [(item["name"], item["symbol"]) for item in data]
+                LOG.info(f"从缓存加载 {len(symbols_list)} 个 (name, symbol) 对")
+                return symbols_list
+        except Exception as e:
+            LOG.info(f"缓存加载失败，将重新拉取: {e}")
 
+    try:
+        df_spot = ak.stock_zh_a_spot()
+        if df_spot.empty:
+            LOG.info("ak.stock_zh_a_spot() 返回空数据，无法获取全市场符号")
+            return []
 
+        # 过滤北交所（代码以 bj 开头）
+        df_spot = df_spot[~df_spot['代码'].str.startswith('bj', na=False)].copy()
+
+        # 统一提取 6 位数字代码
+        def extract_code(code: str) -> str:
+            code = str(code).strip()
+            m = re.search(r'\d{6}', code)
+            return m.group(0) if m else None
+
+        df_spot['symbol'] = df_spot['代码'].apply(extract_code)
+        df_spot = df_spot[df_spot['symbol'].notna() & (df_spot['symbol'].str.len() == 6)]
+
+        # 获取名称列（假设 ak 返回 '名称' 列）
+        name_col = '名称' if '名称' in df_spot.columns else 'name'
+        if name_col not in df_spot.columns:
+            df_spot['name'] = None
+        else:
+            df_spot = df_spot.rename(columns={name_col: 'name'})
+
+        # 去重 + 按 symbol 排序
+        df_spot = df_spot[['name', 'symbol']].drop_duplicates(subset=['symbol'])
+        df_spot = df_spot.sort_values('symbol')
+
+        # 转为 list[tuple[name, symbol]]
+        symbols_list = [
+            (row['name'] if pd.notna(row['name']) else "", row['symbol'])
+            for _, row in df_spot.iterrows()
+        ]
+
+        LOG.info(f"从 ak.stock_zh_a_spot() 获取到 {len(symbols_list)} 个有效 A 股 (name, symbol) 对（已排除北交所）")
+
+        # 保存缓存（list of dict，便于未来扩展）
+        cache_data = [{"name": name, "symbol": symbol} for name, symbol in symbols_list]
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump(cache_data, f, ensure_ascii=False, indent=2)
+
+        return symbols_list
+
+    except Exception as e:
+        LOG.info(f"get_all_symbols_from_spot 失败: {str(e)}")
+        return []
 
 # ================= MAIN ==============================
 # =====================================================
@@ -1107,19 +1592,28 @@ def main():
     end_date = date.today().strftime("%Y%m%d")
 
     if args.refresh:
-        log("刷新模式：清空状态文件")
+        LOG.info("刷新模式：清空状态文件")
         for path in [SCANNED_STATE, FAILED_STATE]:
             if os.path.exists(path):
                 os.remove(path)
                 pass  
-    log(f"启动 A股数据加载，回溯天数: {look_back_days}")
+    LOG.info(f"启动 A股数据加载，回溯天数: {look_back_days}")
 
     run_data_pipeline()
 
     # 如有需要，可继续调用 run_index_loader()、审计等（保持原逻辑）
-  
-    log("本次运行完成")
+    
+    LOG.info("本次运行完成")
 
 if __name__ == '__main__':
     #get_hot_rank_em()
+    setup_logging(market="cn", mode="scraper")
+    LOG = get_logger("Main")
+    LOG.info("start..")
+    #activate_tunnel("cn")
+    toggle_vpn("cn", "start")
+    LOG.info("wireguard activated!")
+    
+    #deactivate_tunnel("cn")
+
     main()

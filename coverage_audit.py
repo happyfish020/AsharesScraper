@@ -9,14 +9,9 @@ from typing import List, Tuple, Optional
 # ==================== UTIL ===========================
 # =====================================================
 
-def log(msg: str):
-    print(msg, flush=True)
-
-
-def log_progress(stage: str, cur: int, total: int, symbol: str, msg: str):
-    pct = (cur / total) * 100 if total else 0
-    log(f"[{stage}] ({cur}/{total} | {pct:6.2f}%) {symbol} {msg}")
-
+from logger import setup_logging, get_logger
+from wireguard_helper import switch_wire_guard
+LOG = get_logger("Main")
 
 
 
@@ -138,19 +133,19 @@ def audit_stock_missing_days(
     Returns:
     - pd.DataFrame: 包含 symbol, missing_type, missing_date, missing_count 等
     """
-    log(f"开始审计股票缺失数据 [{start_date} ~ {end_date}]，使用外部传入基准交易日历")
+    LOG.info(f"开始审计股票缺失数据 [{start_date} ~ {end_date}]，使用外部传入基准交易日历")
 
     # Step 1: 从传入的 base_index_df 提取预期交易日集合
     try:
         base_dates = set(pd.to_datetime(base_index_df['date']).dt.date)
         sorted_base_dates = sorted(base_dates)
-        log(f"基准交易日总数: {len(sorted_base_dates)}")
+        LOG.info(f"基准交易日总数: {len(sorted_base_dates)}")
     except Exception as e:
-        log(f"解析基准交易日历失败: {e}")
+        LOG.info(f"解析基准交易日历失败: {e}")
         raise
 
     if not base_dates:
-        log("基准交易日为空，无法审计")
+        LOG.info("基准交易日为空，无法审计")
         return pd.DataFrame(columns=['symbol', 'missing_type', 'missing_date', 'missing_count'])
 
     # Step 2: 获取待审计股票列表
@@ -158,18 +153,18 @@ def audit_stock_missing_days(
         symbol_query = "SELECT DISTINCT symbol FROM cn_stock_daily_price"
         all_symbols_df = pd.read_sql(symbol_query, engine)
         stock_symbols = all_symbols_df['symbol'].tolist()
-        log(f"自动获取数据库中股票总数: {len(stock_symbols)} 只")
+        LOG.info(f"自动获取数据库中股票总数: {len(stock_symbols)} 只")
     else:
-        log(f"指定审计股票数: {len(stock_symbols)} 只")
+        LOG.info(f"指定审计股票数: {len(stock_symbols)} 只")
 
     if not stock_symbols:
-        log("无股票可审计")
+        LOG.info("无股票可审计")
         return pd.DataFrame(columns=['symbol', 'missing_type', 'missing_date', 'missing_count'])
 
     # Step 3: 分批查询数据库现有记录（解决 ORA-01795）
     batch_size = 900
     batches = math.ceil(len(stock_symbols) / batch_size)
-    log(f"分 {batches} 批查询数据库现有交易日记录")
+    LOG.info(f"分 {batches} 批查询数据库现有交易日记录")
 
     existing_records = []
     for i in range(0, len(stock_symbols), batch_size):
@@ -187,9 +182,9 @@ def audit_stock_missing_days(
             if not batch_df.empty:
                 batch_df['trade_date'] = pd.to_datetime(batch_df['trade_date']).dt.date
                 existing_records.append(batch_df)
-            log(f"批次 {i//batch_size + 1}/{batches} 查询完成，记录数: {len(batch_df)}")
+            LOG.info(f"批次 {i//batch_size + 1}/{batches} 查询完成，记录数: {len(batch_df)}")
         except Exception as e:
-            log(f"批次查询失败: {e}")
+            LOG.info(f"批次查询失败: {e}")
             raise
 
     # 合并所有批次
@@ -240,9 +235,9 @@ def audit_stock_missing_days(
         result_df = result_df.sort_values(['missing_type', 'symbol', 'missing_date'])
         window_count = len(result_df[result_df['missing_type'] == 'WINDOW_START'])
         gap_count = len(result_df[result_df['missing_type'] == 'GAP'])
-        log(f"股票审计完成，发现缺失 {len(result_df)} 条（WINDOW_START: {window_count}，GAP: {gap_count}）")
+        LOG.info(f"股票审计完成，发现缺失 {len(result_df)} 条（WINDOW_START: {window_count}，GAP: {gap_count}）")
     else:
-        log("股票审计完成，未发现缺失数据")
+        LOG.info("股票审计完成，未发现缺失数据")
 
     return result_df
 # =====================================================
@@ -272,31 +267,31 @@ def audit_index_missing_days(
     - gap_df: pd.DataFrame - GAP 类型缺失
     - window_start_df: pd.DataFrame - WINDOW_START 类型缺失
     """
-    log(f"开始审计指数日历健康 [{start_date} ~ {end_date}]，审计指数数: {len(index_codes)}")
+    LOG.info(f"开始审计指数日历健康 [{start_date} ~ {end_date}]，审计指数数: {len(index_codes)}")
 
     # Step 1: 从传入的 base_index_df 提取标准交易日
     try:
         base_dates = set(pd.to_datetime(base_index_df['date']).dt.date)
         sorted_base_dates = sorted(base_dates)
-        log(f"基准交易日总数: {len(sorted_base_dates)}")
+        LOG.info(f"基准交易日总数: {len(sorted_base_dates)}")
     except Exception as e:
-        log(f"解析基准交易日历失败: {e}")
+        LOG.info(f"解析基准交易日历失败: {e}")
         raise
 
     if not base_dates:
-        log("基准交易日为空，无法审计指数")
+        LOG.info("基准交易日为空，无法审计指数")
         empty_df = pd.DataFrame(columns=['index_code', 'missing_type', 'missing_date', 'missing_count'])
         return empty_df.copy(), empty_df.copy()
 
     if not index_codes:
-        log("无指数可审计")
+        LOG.info("无指数可审计")
         empty_df = pd.DataFrame(columns=['index_code', 'missing_type', 'missing_date', 'missing_count'])
         return empty_df.copy(), empty_df.copy()
 
     # Step 2: 分批从数据库查询指数已有交易日（解决 ORA-01795）
     batch_size = 900
     batches = math.ceil(len(index_codes) / batch_size)
-    log(f"分 {batches} 批查询数据库中指数现有记录")
+    LOG.info(f"分 {batches} 批查询数据库中指数现有记录")
 
     existing_records = []
     for i in range(0, len(index_codes), batch_size):
@@ -314,9 +309,9 @@ def audit_index_missing_days(
             if not batch_df.empty:
                 batch_df['trade_date'] = pd.to_datetime(batch_df['trade_date']).dt.date
                 existing_records.append(batch_df)
-            log(f"指数批次 {i//batch_size + 1}/{batches} 查询完成，记录数: {len(batch_df)}")
+            LOG.info(f"指数批次 {i//batch_size + 1}/{batches} 查询完成，记录数: {len(batch_df)}")
         except Exception as e:
-            log(f"指数批次查询失败: {e}")
+            LOG.info(f"指数批次查询失败: {e}")
             raise
 
     # 合并结果
@@ -374,7 +369,7 @@ def audit_index_missing_days(
 
     total_gaps = len(gap_df)
     total_windows = len(window_start_df)
-    log(f"指数日历审计完成，GAP 缺失 {total_gaps} 条，WINDOW_START 缺失 {total_windows} 条")
+    LOG.info(f"指数日历审计完成，GAP 缺失 {total_gaps} 条，WINDOW_START 缺失 {total_windows} 条")
 
     return gap_df, window_start_df 
  
@@ -397,14 +392,24 @@ def run_full_coverage_audit(
 
     base_index = "sh000300"  # 或 "sh000001"
 
-    base_index_df = ak.stock_zh_index_daily_em(
-        symbol=base_index,
-        start_date=start_date,
-        end_date=end_date,
-    )
+    max_retries = 8
+    for attempt in range(1, max_retries + 1):
+        try:
+            base_index_df = ak.stock_zh_index_daily_em(
+                symbol=base_index,
+                start_date=start_date,
+                end_date=end_date,)
+            
+        except Exception as e:
+            if attempt == max_retries:
+                LOG.info(e)
+                raise RuntimeError(
+                    f"获取指数 {base_index} 日线数据失败（已重试 {max_retries} 次）：{str(e)}"
+                ) from e
+            switch_wire_guard("cn")
     
     if base_index_df.empty:
-        print("获取基准交易日历失败")
+        LOG.info("获取基准交易日历失败")
     else:
         # Step 2: 股票缺失审计
         gap_df, window_start_df = audit_index_missing_days(

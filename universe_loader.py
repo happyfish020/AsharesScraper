@@ -48,11 +48,11 @@ def load_universe() -> Dict[str, dict]:
     if os.path.exists(UNIVERSE_FILE):
         with open(UNIVERSE_FILE, "r", encoding="utf-8") as f:
             universe = json.load(f)
-        print(f"[UNIVERSE] loaded from local file: {UNIVERSE_FILE} ({len(universe)})")
+        LOG.info(f"[UNIVERSE] loaded from local file: {UNIVERSE_FILE} ({len(universe)})")
         return universe
 
     # ---------- 2️⃣ 从 ak 构建 ----------
-    print("[UNIVERSE] local file not found, building from akshare ...")
+    LOG.info("[UNIVERSE] local file not found, building from akshare ...")
 
     universe: Dict[str, dict] = {}
 
@@ -63,7 +63,7 @@ def load_universe() -> Dict[str, dict]:
         try:
             cons_df = ak.sw_index_third_cons(symbol=ind_code)
         except Exception as e:
-            print(f"[UNIVERSE][WARN] failed to load industry {ind_code}: {e}")
+            LOG.info(f"[UNIVERSE][WARN] failed to load industry {ind_code}: {e}")
             continue
 
         for _, r in cons_df.iterrows():
@@ -81,6 +81,6 @@ def load_universe() -> Dict[str, dict]:
     with open(UNIVERSE_FILE, "w", encoding="utf-8") as f:
         json.dump(universe, f, ensure_ascii=False, indent=2)
 
-    print(f"[UNIVERSE] built and saved to {UNIVERSE_FILE} ({len(universe)})")
+    LOG.info(f"[UNIVERSE] built and saved to {UNIVERSE_FILE} ({len(universe)})")
 
     return universe

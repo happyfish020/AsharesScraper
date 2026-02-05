@@ -17,6 +17,8 @@ import akshare as ak
 
 from sqlalchemy import create_engine, text, inspect
 
+from wireguard_helper import deactivate_tunnel
+
 # ==============================
 #        配置
 # ==============================
@@ -88,7 +90,7 @@ def create_table_if_not_exists():
 # ==============================
 def load_index_futures_daily(start_date: str, end_date: str = None):
     create_table_if_not_exists()
-
+    deactivate_tunnel("cn")
     # 日期标准化
     def to_date_str(d):
         if isinstance(d, datetime):

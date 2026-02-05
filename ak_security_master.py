@@ -2,7 +2,8 @@ import pandas as pd
 from datetime import date
 from sqlalchemy import create_engine, text, inspect
 import akshare as ak
-
+from logger import setup_logging, get_logger
+LOG = get_logger("Main")
 # ==============================
 #        数据库连接配置
 # ==============================
@@ -32,7 +33,7 @@ def create_table_if_not_exists():
     inspector = inspect(engine)
     
     if not inspector.has_table(TABLE_NAME, schema=SCHEMA_NAME):
-        print(f"表 {SCHEMA_NAME}.{TABLE_NAME} 不存在，正在创建...")
+        LOG.info(f"表 {SCHEMA_NAME}.{TABLE_NAME} 不存在，正在创建...")
         
         create_table_sql = f"""
         CREATE TABLE {SCHEMA_NAME}.{TABLE_NAME} (
@@ -75,9 +76,9 @@ def create_table_if_not_exists():
             conn.execute(text(create_index2))
             conn.execute(text(create_index3))
             conn.commit()
-        print("表结构、主键和常用索引已创建完成")
+        LOG.info("表结构、主键和常用索引已创建完成")
     else:
-        print(f"表 {SCHEMA_NAME}.{TABLE_NAME} 已存在，跳过创建")
+        LOG.info(f"表 {SCHEMA_NAME}.{TABLE_NAME} 已存在，跳过创建")
 
 # ==============================
 #           主程序
@@ -87,12 +88,12 @@ if __name__ == "__main__":
     create_table_if_not_exists()
 
     # 2. 获取最新 A 股列表
-    print("\n正在从 akshare 获取 A 股基础信息...")
+    LOG.info("\n正在从 akshare 获取 A 股基础信息...")
     try:
         df = ak.stock_info_a_code_name()
-        print(f"成功获取 {len(df)} 条记录")
+        LOG.info(f"成功获取 {len(df)} 条记录")
     except Exception as e:
-        print("获取数据失败:", str(e))
+        LOG.info("获取数据失败:", str(e))
         exit(1)
 
     # 3. 数据清洗与字段映射
@@ -150,7 +151,7 @@ if __name__ == "__main__":
             (:SYMBOL, :EXCHANGE, :NAME, :STATUS, :ASOF_DATE, :SOURCE, :CREATED_AT)
     """)
 
-    print(f"\n准备插入 {len(records)} 条记录...")
+    LOG.info(f"\n准备插入 {len(records)} 条记录...")
 
     try:
         with engine.connect() as conn:
@@ -168,13 +169,13 @@ if __name__ == "__main__":
                 batch = records[i:i + batch_size]
                 conn.execute(insert_sql, batch)
                 inserted_count += len(batch)
-                print(f"已插入 {inserted_count}/{len(records)} 条...")
+                LOG.info(f"已插入 {inserted_count}/{len(records)} 条...")
 
             conn.commit()
-            print(f"\n插入完成！共插入 {inserted_count} 条记录（日期：{today}）")
+            LOG.info(f"\n插入完成！共插入 {inserted_count} 条记录（日期：{today}）")
 
     except Exception as e:
-        print("\n插入失败：", str(e))
+        LOG.info("\n插入失败：", str(e))
         raise
 
     # 6. 可选：验证插入结果
@@ -184,6 +185,6 @@ if __name__ == "__main__":
                 text("SELECT COUNT(*) FROM SECOPR.CN_SECURITY_MASTER WHERE ASOF_DATE = :dt"),
                 {"dt": today}
             ).scalar()
-            print(f"验证：当天记录总数 = {count}")
+            LOG.info(f"验证：当天记录总数 = {count}")
     except Exception as e:
-        print("验证查询失败:", str(e))
+        LOG.info("验证查询失败:", str(e))

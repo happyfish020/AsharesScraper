@@ -8,12 +8,12 @@
             "name": "Python Debugger: Current File",
             "type": "debugpy",
             "request": "launch",
-            "program": "runner.py" ,//"ak_sector_defined.py",//"ak_security_master.py"  , // "runner.py",
+            "program": "etf_flow_test1.py", //"runner.py" ,// "fetch_etf_data.py", //"ak_option_sse_daily_sina.py", //"runner.py" ,//"ak_sector_defined.py",//"ak_security_master.py"  , // "runner.py",
             "console": "integratedTerminal",
             "args": [
-               // "--refresh"
-               // "--days",
-               // "240"
+                "--refresh",
+              //  "--days",
+              //  "10"
             ],
         }
     ]
