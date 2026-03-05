@@ -9,6 +9,8 @@ oracledb>=2.0.0
 # ---------- Market data ----------
 akshare>=1.12.0
 baostock
+yfinance
+tushare>=1.4.0
 
 # ---------- Utilities ----------
 python-dateutil>=2.8.2

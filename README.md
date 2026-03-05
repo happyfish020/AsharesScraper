@@ -6,8 +6,8 @@ pip install curl_cffi
 
 3）SP 跑某天前，先写入 GTT 参数
 
-TRUNCATE TABLE SECOPR.GTT_TRADE_DATE_PARAM;
-INSERT INTO SECOPR.GTT_TRADE_DATE_PARAM(TRADE_DATE) VALUES (DATE '2026-01-27');
+TRUNCATE TABLE not_secopr.GTT_TRADE_DATE_PARAM;
+INSERT INTO not_secopr.GTT_TRADE_DATE_PARAM(TRADE_DATE) VALUES (DATE '2026-01-27');
 COMMIT;
 
 
@@ -21,11 +21,11 @@ COMMIT;
 SELECT d.trade_date
 FROM (
   SELECT DISTINCT trade_date
-  FROM SECOPR.CN_STOCK_DAILY_PRICE
+  FROM not_secopr.CN_STOCK_DAILY_PRICE
 ) d
 LEFT JOIN (
   SELECT DISTINCT trade_date
-  FROM SECOPR.CN_SECTOR_ENERGY_SNAP_T
+  FROM not_secopr.CN_SECTOR_ENERGY_SNAP_T
 ) e
 ON e.trade_date = d.trade_date
 WHERE e.trade_date IS NULL
@@ -43,7 +43,7 @@ ORDER BY d.trade_date;
 日常跑（只补缺的那一天）
 
 BEGIN
-  SECOPR.SP_BACKFILL_SECTOR_ENERGY_SNAP(NULL, 0);
+  not_secopr.SP_BACKFILL_SECTOR_ENERGY_SNAP(NULL, 0);
 END;
 /
 
@@ -51,7 +51,7 @@ END;
 补历史缺口（例如把 2026-01-24~2026-02-06 全补齐）
 
 BEGIN
-  SECOPR.SP_BACKFILL_SECTOR_ENERGY_SNAP(DATE '2026-02-06', 0);
+  not_secopr.SP_BACKFILL_SECTOR_ENERGY_SNAP(DATE '2026-02-06', 0);
 END;
 /
 
@@ -59,7 +59,7 @@ END;
 强制重算（当天已有数据但你想重算）
 
 BEGIN
-  SECOPR.SP_REFRESH_SECTOR_ENERGY_SNAP(DATE '2026-02-06', 1);
+  not_secopr.SP_REFRESH_SECTOR_ENERGY_SNAP(DATE '2026-02-06', 1);
 END;
 /
 
@@ -67,19 +67,19 @@ END;
 每天怎么跑（生产）
 日常（推荐）
 BEGIN
-  SECOPR.SP_BACKFILL_SECTOR_ENERGY_SNAP(NULL, 0);
+  not_secopr.SP_BACKFILL_SECTOR_ENERGY_SNAP(NULL, 0);
 END;
 /
 
 一次性补齐历史（你现在必须跑）
 BEGIN
-  SECOPR.SP_BACKFILL_SECTOR_ENERGY_SNAP(DATE '2026-02-06', 0);
+  not_secopr.SP_BACKFILL_SECTOR_ENERGY_SNAP(DATE '2026-02-06', 0);
 END;
 
 
 ---- 
 BEGIN
-  SECOPR.SP_REFRESH_ROTATION_SNAP_ALL(
+  not_secopr.SP_REFRESH_ROTATION_SNAP_ALL(
     'SR_BASE_V535_EP90_XP55_XC2_MH5_RF5_K2_COST5BPS',
     DATE '2026-01-23',
     1
@@ -96,7 +96,7 @@ END;
 Energy 日更（你 Step A 已做）
 
 BEGIN
-  SECOPR.SP_BACKFILL_SECTOR_ENERGY_SNAP(TRUNC(SYSDATE), 0);
+  not_secopr.SP_BACKFILL_SECTOR_ENERGY_SNAP(TRUNC(SYSDATE), 0);
 END;
 /
 
@@ -104,8 +104,8 @@ END;
 构建 rotation ranked + signal（latest）
 
 BEGIN
-  SECOPR.SP_BUILD_SECTOR_ROTATION_RANKED_LATEST;
-  SECOPR.SP_BUILD_SECTOR_ROTATION_SIGNAL_LATEST;
+  not_secopr.SP_BUILD_SECTOR_ROTATION_RANKED_LATEST;
+  not_secopr.SP_BUILD_SECTOR_ROTATION_SIGNAL_LATEST;
 END;
 /
 
@@ -115,9 +115,9 @@ END;
 你已补到 2/06（792 行）。后续每日跑一次即可。
 
 BEGIN
-  SECOPR.SP_BACKFILL_ROT_BT_FROM_PRICE(
+  not_secopr.SP_BACKFILL_ROT_BT_FROM_PRICE(
     'SR_BASE_V535_EP90_XP55_XC2_MH5_RF5_K2_COST5BPS',
-    (SELECT MAX(trade_date) FROM SECOPR.CN_STOCK_DAILY_PRICE),
+    (SELECT MAX(trade_date) FROM not_secopr.CN_STOCK_DAILY_PRICE),
     0
   );
 END;
@@ -127,9 +127,9 @@ END;
 生成三张 snapshot（强制=0，生产幂等）
 
 BEGIN
-  SECOPR.SP_REFRESH_ROTATION_SNAP_ALL(
+  not_secopr.SP_REFRESH_ROTATION_SNAP_ALL(
     'SR_BASE_V535_EP90_XP55_XC2_MH5_RF5_K2_COST5BPS',
-    (SELECT MAX(trade_date) FROM SECOPR.CN_STOCK_DAILY_PRICE),
+    (SELECT MAX(trade_date) FROM not_secopr.CN_STOCK_DAILY_PRICE),
     0
   );
 END;
@@ -204,19 +204,19 @@ BT 日历轴已覆盖当天（用于 T+1 执行日）
 取当天交易日：
 
 SELECT MAX(trade_date) AS dt
-FROM SECOPR.CN_STOCK_DAILY_PRICE;
+FROM not_secopr.CN_STOCK_DAILY_PRICE;
 
 Step 1 校验：Ranked Latest 是否生成
 1.1 基础数据是否到当天（必须）
 SELECT MAX(trade_date) AS eod_agg_max_dt
-FROM SECOPR.CN_SECTOR_EOD_AGG_T;
+FROM not_secopr.CN_SECTOR_EOD_AGG_T;
 
 
 期望：eod_agg_max_dt = :DT
 
 1.2 Transition 视图当天是否有行（决定 ranked/signal 能否产）
 SELECT COUNT(*) AS n_trans
-FROM SECOPR.CN_SECTOR_ROTATION_TRANSITION_V
+FROM not_secopr.CN_SECTOR_ROTATION_TRANSITION_V
 WHERE trade_date = :DT;
 
 
@@ -224,7 +224,7 @@ WHERE trade_date = :DT;
 
 1.3 Ranked 表当天行数是否等于 transition（通常应一致）
 SELECT COUNT(*) AS n_ranked
-FROM SECOPR.CN_SECTOR_ROTATION_RANKED_T
+FROM not_secopr.CN_SECTOR_ROTATION_RANKED_T
 WHERE trade_date = :DT;
 
 
@@ -235,7 +235,7 @@ WHERE trade_date = :DT;
 Step 2 校验：Signal Latest 是否生成（ENTER/EXIT/WATCH）
 2.1 当天是否已有 signal 行（SP 会“有则 return”）
 SELECT action, COUNT(*) AS n
-FROM SECOPR.CN_SECTOR_ROTATION_SIGNAL_T
+FROM not_secopr.CN_SECTOR_ROTATION_SIGNAL_T
 WHERE TRUNC(signal_date) = :DT
 GROUP BY action
 ORDER BY action;
@@ -248,7 +248,7 @@ ORDER BY action;
 推荐直接看 transition 分布（判断是否策略枚举触发不足）：
 
 SELECT transition, COUNT(*) n
-FROM SECOPR.CN_SECTOR_ROTATION_TRANSITION_V
+FROM not_secopr.CN_SECTOR_ROTATION_TRANSITION_V
 WHERE trade_date = :DT
 GROUP BY transition
 ORDER BY n DESC FETCH FIRST 30 ROWS ONLY;
@@ -257,7 +257,7 @@ ORDER BY n DESC FETCH FIRST 30 ROWS ONLY;
 你可以进一步复刻 ENTER 条件做 sanity check（不是生产逻辑，只是验收辅助）：
 
 SELECT COUNT(*) AS n_enter_candidate
-FROM SECOPR.CN_SECTOR_ROTATION_TRANSITION_V
+FROM not_secopr.CN_SECTOR_ROTATION_TRANSITION_V
 WHERE trade_date = :DT
   AND transition IN ('IGNITE_TO_CONFIRM','DIRECT_CONFIRM')
   AND theme_rank = 1
@@ -275,7 +275,7 @@ Step 3 校验：BT 日历轴是否覆盖当天（用于 T+1）
 
 3.1 BT 是否包含当天
 SELECT *
-FROM SECOPR.CN_SECTOR_ROT_BT_DAILY_T
+FROM not_secopr.CN_SECTOR_ROT_BT_DAILY_T
 WHERE run_id = :RUN_ID
   AND trade_date = :DT;
 
@@ -290,7 +290,7 @@ EXPOSED_FLAG 非空（无持仓时是 0）
 
 3.2 BT 是否有 next trade day（用于 T+1）
 SELECT MIN(trade_date) AS next_trade_date
-FROM SECOPR.CN_SECTOR_ROT_BT_DAILY_T
+FROM not_secopr.CN_SECTOR_ROT_BT_DAILY_T
 WHERE run_id = :RUN_ID
   AND trade_date > :DT;
 
@@ -304,15 +304,15 @@ WHERE run_id = :RUN_ID
 Step 4 校验：三张 Snapshot 是否落库（报告层唯一依赖）
 4.1 行数必须 ≥ 1（明细或 summary）
 SELECT 'ENTRY' snap, COUNT(*) n
-FROM SECOPR.CN_ROTATION_ENTRY_SNAP_T
+FROM not_secopr.CN_ROTATION_ENTRY_SNAP_T
 WHERE run_id=:RUN_ID AND trade_date=:DT
 UNION ALL
 SELECT 'HOLDING', COUNT(*)
-FROM SECOPR.CN_ROTATION_HOLDING_SNAP_T
+FROM not_secopr.CN_ROTATION_HOLDING_SNAP_T
 WHERE run_id=:RUN_ID AND trade_date=:DT
 UNION ALL
 SELECT 'EXIT', COUNT(*)
-FROM SECOPR.CN_ROTATION_EXIT_SNAP_T
+FROM not_secopr.CN_ROTATION_EXIT_SNAP_T
 WHERE run_id=:RUN_ID AND trade_date=:DT;
 
 
@@ -323,7 +323,7 @@ WHERE run_id=:RUN_ID AND trade_date=:DT;
 Top1（若无明细则返回 summary）：
 
 SELECT sector_id, sector_name, entry_rank, energy_pct, energy_tier, source_json
-FROM SECOPR.CN_ROTATION_ENTRY_SNAP_T
+FROM not_secopr.CN_ROTATION_ENTRY_SNAP_T
 WHERE run_id=:RUN_ID AND trade_date=:DT
 ORDER BY CASE WHEN sector_id=-1 THEN 9 ELSE 0 END, entry_rank
 FETCH FIRST 1 ROWS ONLY;
@@ -332,7 +332,7 @@ FETCH FIRST 1 ROWS ONLY;
 Pool（rank>=2）：
 
 SELECT sector_name, entry_rank, energy_pct, energy_tier, signal_score
-FROM SECOPR.CN_ROTATION_ENTRY_SNAP_T
+FROM not_secopr.CN_ROTATION_ENTRY_SNAP_T
 WHERE run_id=:RUN_ID AND trade_date=:DT
   AND sector_id<>-1
   AND entry_rank>=2
@@ -343,13 +343,13 @@ ORDER BY entry_rank;
 无持仓 summary（你例子会看到 NO_HOLDING_TODAY）：
 
 SELECT sector_id, sector_name, hold_days, exit_exec_status, source_json
-FROM SECOPR.CN_ROTATION_HOLDING_SNAP_T
+FROM not_secopr.CN_ROTATION_HOLDING_SNAP_T
 WHERE run_id=:RUN_ID AND trade_date=:DT
 ORDER BY CASE WHEN sector_id=-1 THEN 0 ELSE 1 END, hold_days DESC;
 
 4.4 EXIT：仅对“真实持仓 + EXIT 信号”输出明细，否则 summary
 SELECT sector_id, sector_name, exec_exit_date, exit_exec_status, source_json
-FROM SECOPR.CN_ROTATION_EXIT_SNAP_T
+FROM not_secopr.CN_ROTATION_EXIT_SNAP_T
 WHERE run_id=:RUN_ID AND trade_date=:DT
 ORDER BY CASE WHEN sector_id=-1 THEN 0 ELSE 1 END;
 
@@ -362,7 +362,7 @@ A) ENTRY/HOLDING/EXIT 都是 0 行
 
 SELECT object_name, status
 FROM all_objects
-WHERE owner='SECOPR'
+WHERE owner='not_secopr'
   AND object_type='PROCEDURE'
   AND object_name IN (
     'SP_REFRESH_ROTATION_SNAP_ALL',
@@ -376,7 +376,7 @@ B) ENTRY 只有 summary（NO_ENTRY_TODAY）
 查当日 signal：
 
 SELECT action, COUNT(*) n
-FROM SECOPR.CN_SECTOR_ROTATION_SIGNAL_T
+FROM not_secopr.CN_SECTOR_ROTATION_SIGNAL_T
 WHERE TRUNC(signal_date)=:DT
 GROUP BY action;
 
@@ -388,7 +388,7 @@ C) summary 里 next_trade_date / exec_exit_date 为 NULL
 查 BT 是否有 trade_date > :DT：
 
 SELECT MIN(trade_date) next_trade_date
-FROM SECOPR.CN_SECTOR_ROT_BT_DAILY_T
+FROM not_secopr.CN_SECTOR_ROT_BT_DAILY_T
 WHERE run_id=:RUN_ID AND trade_date>:DT;
 
 
@@ -406,13 +406,13 @@ D) BT 插入报 ORA-01400（某列非空）
 
 :DT：
 
-SELECT MAX(trade_date) dt FROM SECOPR.CN_STOCK_DAILY_PRICE;
+SELECT MAX(trade_date) dt FROM not_secopr.CN_STOCK_DAILY_PRICE;
 
 
 signal 当天分布：
 
 SELECT action, COUNT(*) n
-FROM SECOPR.CN_SECTOR_ROTATION_SIGNAL_T
+FROM not_secopr.CN_SECTOR_ROTATION_SIGNAL_T
 WHERE TRUNC(signal_date)=:DT
 GROUP BY action ORDER BY action;
 
@@ -420,17 +420,17 @@ GROUP BY action ORDER BY action;
 bt 当天是否存在：
 
 SELECT COUNT(*) n
-FROM SECOPR.CN_SECTOR_ROT_BT_DAILY_T
+FROM not_secopr.CN_SECTOR_ROT_BT_DAILY_T
 WHERE run_id=:RUN_ID AND trade_date=:DT;
 
 
 三张 snapshot 行数：
 
-SELECT 'ENTRY' snap, COUNT(*) n FROM SECOPR.CN_ROTATION_ENTRY_SNAP_T WHERE run_id=:RUN_ID AND trade_date=:DT
+SELECT 'ENTRY' snap, COUNT(*) n FROM not_secopr.CN_ROTATION_ENTRY_SNAP_T WHERE run_id=:RUN_ID AND trade_date=:DT
 UNION ALL
-SELECT 'HOLDING', COUNT(*) FROM SECOPR.CN_ROTATION_HOLDING_SNAP_T WHERE run_id=:RUN_ID AND trade_date=:DT
+SELECT 'HOLDING', COUNT(*) FROM not_secopr.CN_ROTATION_HOLDING_SNAP_T WHERE run_id=:RUN_ID AND trade_date=:DT
 UNION ALL
-SELECT 'EXIT', COUNT(*) FROM SECOPR.CN_ROTATION_EXIT_SNAP_T WHERE run_id=:RUN_ID AND trade_date=:DT;
+SELECT 'EXIT', COUNT(*) FROM not_secopr.CN_ROTATION_EXIT_SNAP_T WHERE run_id=:RUN_ID AND trade_date=:DT;
 
 ---
 

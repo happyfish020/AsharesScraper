@@ -4,7 +4,7 @@ import math
 from typing import List, Optional
 
 import pandas as pd
-from sqlalchemy import Tuple
+from sqlalchemy import Tuple, text
 import akshare as ak
 
 from app.utils.wireguard_helper import activate_tunnel, switch_wire_guard
@@ -17,6 +17,36 @@ class CoverageAuditTask:
     def __init__(self):
         root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".." ,".."))
         self.audit_reports_dir = os.path.join(root_dir, "audit_reports")
+
+    @staticmethod
+    def _resolve_col(df: pd.DataFrame, *candidates: str) -> str:
+        cols = list(df.columns)
+        lower_map = {c.lower(): c for c in cols}
+        for c in candidates:
+            hit = lower_map.get(c.lower())
+            if hit is not None:
+                return hit
+        raise KeyError(candidates[0])
+
+    def _relation_exists(self, name: str) -> bool:
+        q = text(
+            """
+            SELECT COUNT(*)
+            FROM (
+                SELECT table_name AS rel_name
+                FROM information_schema.tables
+                WHERE table_schema = DATABASE()
+                UNION ALL
+                SELECT table_name AS rel_name
+                FROM information_schema.views
+                WHERE table_schema = DATABASE()
+            ) x
+            WHERE x.rel_name = :t
+            """
+        )
+        with self.ctx.engine.connect() as conn:
+            n = conn.execute(q, {"t": name}).scalar()
+        return int(n or 0) > 0
 
     def run(self, ctx) -> None:
         self.ctx = ctx
@@ -51,11 +81,19 @@ class CoverageAuditTask:
         max_retries = 8
         for attempt in range(1, max_retries + 1):
             try:
-                base_index_df = ak.stock_zh_index_daily_em(
-                    symbol=base_index,
-                    start_date=start_date,
-                    end_date=end_date,)
-                
+                # Direct replacement: use Sina index daily endpoint (EM endpoint is unstable here)
+                base_index_df = ak.stock_zh_index_daily(symbol=base_index)
+                if base_index_df is None or base_index_df.empty:
+                    raise RuntimeError("stock_zh_index_daily returned empty dataframe")
+
+                # Keep the same window semantics as before.
+                base_index_df["date"] = pd.to_datetime(base_index_df["date"], errors="coerce")
+                d1 = pd.to_datetime(start_date)
+                d2 = pd.to_datetime(end_date)
+                base_index_df = base_index_df[
+                    (base_index_df["date"] >= d1) & (base_index_df["date"] <= d2)
+                ].copy()
+                break
             except Exception as e:
                 if attempt == max_retries:
                     self.log.info(e)
@@ -63,7 +101,6 @@ class CoverageAuditTask:
                         f"获取指数 {base_index} 日线数据失败（已重试 {max_retries} 次）：{str(e)}"
                     ) from e
                 self.log.warn("获取失败")
-                #switch_wire_guard("cn")
         
         if base_index_df.empty:
             self.log.info("获取基准交易日历失败")
@@ -136,7 +173,19 @@ class CoverageAuditTask:
     
         # Step 2: 获取待审计股票列表
         if stock_symbols is None:
-            symbol_query = "SELECT DISTINCT symbol FROM cn_stock_daily_price"
+            if self._relation_exists("cn_stock_active_universe_v"):
+                symbol_query = "SELECT symbol FROM cn_stock_active_universe_v"
+                self.log.info("使用活跃股票视图 cn_stock_active_universe_v")
+            elif self._relation_exists("cn_stock_universe_status_t"):
+                symbol_query = """
+                    SELECT symbol
+                    FROM cn_stock_universe_status_t
+                    WHERE IFNULL(is_active, 1) = 1
+                """
+                self.log.info("使用活跃股票池 cn_stock_universe_status_t(is_active=1)")
+            else:
+                symbol_query = "SELECT DISTINCT symbol FROM cn_stock_daily_price"
+                self.log.info("未检测到状态表，回退到全历史股票池")
             all_symbols_df = pd.read_sql(symbol_query, self.ctx.engine)
             stock_symbols = all_symbols_df['symbol'].tolist()
             self.log.info(f"自动获取数据库中股票总数: {len(stock_symbols)} 只")
@@ -165,6 +214,9 @@ class CoverageAuditTask:
             try:
                 batch_df = pd.read_sql(query, self.ctx.engine)
                 if not batch_df.empty:
+                    td_col = self._resolve_col(batch_df, "trade_date", "TRADE_DATE")
+                    sym_col = self._resolve_col(batch_df, "symbol", "SYMBOL")
+                    batch_df = batch_df.rename(columns={td_col: "trade_date", sym_col: "symbol"})
                     batch_df['trade_date'] = pd.to_datetime(batch_df['trade_date']).dt.date
                     existing_records.append(batch_df)
                 self.log.info(f"批次 {i//batch_size + 1}/{batches} 查询完成，记录数: {len(batch_df)}")
@@ -294,6 +346,9 @@ class CoverageAuditTask:
             try:
                 batch_df = pd.read_sql(query, self.ctx.engine)
                 if not batch_df.empty:
+                    td_col = self._resolve_col(batch_df, "trade_date", "TRADE_DATE")
+                    idx_col = self._resolve_col(batch_df, "index_code", "INDEX_CODE")
+                    batch_df = batch_df.rename(columns={td_col: "trade_date", idx_col: "index_code"})
                     batch_df['trade_date'] = pd.to_datetime(batch_df['trade_date']).dt.date
                     existing_records.append(batch_df)
                 self.log.info(f"指数批次 {i//batch_size + 1}/{batches} 查询完成，记录数: {len(batch_df)}")
@@ -360,4 +415,3 @@ class CoverageAuditTask:
     
         return gap_df, window_start_df 
  
-

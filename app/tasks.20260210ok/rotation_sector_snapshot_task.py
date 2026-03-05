@@ -52,9 +52,9 @@ class SectorRotationSnapshotTask:
     Configuration (environment variables):
     - ROTATION_SNAPSHOT_SP_BLOCK (required):
         Example:
-          BEGIN SECOPR.SP_REFRESH_SECTOR_ROTATION_DAILY(p_run_id=>:run_id, p_trade_date=>:trade_date); END;
+          BEGIN not_secopr.SP_REFRESH_SECTOR_ROTATION_DAILY(p_run_id=>:run_id, p_trade_date=>:trade_date); END;
         or (range mode):
-          BEGIN SECOPR.SP_BUILD_SECTOR_ROT_SIGNAL(p_run_id=>:run_id, p_start_date=>:start_date, p_end_date=>:end_date); END;
+          BEGIN not_secopr.SP_BUILD_SECTOR_ROT_SIGNAL(p_run_id=>:run_id, p_start_date=>:start_date, p_end_date=>:end_date); END;
 
     - ROTATION_SNAPSHOT_RUN_ID (optional):
         If your SP needs a run_id bind, set it here. If not referenced in the block, it's ignored.
@@ -78,7 +78,7 @@ class SectorRotationSnapshotTask:
         #plsql_block = "SP_ROTATION_DAILY_REFRESH"
         plsql_block = """
             BEGIN
-              SECOPR.SP_ROTATION_DAILY_REFRESH(
+              not_secopr.SP_ROTATION_DAILY_REFRESH(
                 :p_run_id,
                 :p_trade_date,
                 :p_force,
@@ -92,7 +92,7 @@ class SectorRotationSnapshotTask:
         if not plsql_block:
             raise RuntimeError(
                 "ROTATION_SNAPSHOT_SP_BLOCK is required. "
-                "Provide a PL/SQL block that calls your existing SECOPR SP to generate ENTER/HOLD/EXIT snapshots."
+                "Provide a PL/SQL block that calls your existing not_secopr SP to generate ENTER/HOLD/EXIT snapshots."
             )
 
         run_id = 'SR_BASE_V535_EP90_XP55_XC2_MH5_RF5_K2_COST5BPS' #

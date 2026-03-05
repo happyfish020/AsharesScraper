@@ -20,7 +20,7 @@
 
 ### 2.1 回测主入口
 
-`SECOPR.SP_RUN_SECTOR_ROT_BACKTEST`
+`not_secopr.SP_RUN_SECTOR_ROT_BACKTEST`
 
 调用来源：
 
@@ -46,8 +46,8 @@
 
 ### 2.2 结果校验入口
 
-1. `SECOPR.SP_VALIDATE_SECTOR_ROT_RUN(run_id)`
-2. `SECOPR.SP_VALIDATE_AGAINST_BASELINE(p_run_id, p_baseline_id, p_min_alpha)`
+1. `not_secopr.SP_VALIDATE_SECTOR_ROT_RUN(run_id)`
+2. `not_secopr.SP_VALIDATE_AGAINST_BASELINE(p_run_id, p_baseline_id, p_min_alpha)`
 
 调用来源：
 
@@ -57,7 +57,7 @@
 
 ### 2.3 日常刷新总入口
 
-`SECOPR.SP_ROTATION_DAILY_REFRESH(run_id, trade_date, p_force, p_refresh_energy)`
+`not_secopr.SP_ROTATION_DAILY_REFRESH(run_id, trade_date, p_force, p_refresh_energy)`
 
 来源：`docs/板块轮动.md`（作为日常 EOD 总控入口）。
 
@@ -76,8 +76,8 @@
 
 1. `SP_BACKFILL_SECTOR_ENERGY_SNAP`
 2. `SP_REFRESH_SECTOR_ENERGY_SNAP`
-3. `SP_BUILD_SECTOR_ROTATION_RANKED_LATEST`
-4. `SP_BUILD_SECTOR_ROTATION_SIGNAL_LATEST`
+3. `SP_BUILD_SECTOR_ROTATION_RANKED_BY_DATE`
+4. `SP_BUILD_SECTOR_ROTATION_SIGNAL_BY_DATE`
 5. `SP_BACKFILL_ROT_BT_FROM_PRICE`
 6. `SP_REFRESH_ROTATION_SNAP_ALL`
 7. `SP_REFRESH_ROTATION_ENTRY_SNAP`
@@ -174,7 +174,7 @@ WITH RECURSIVE_DEPS AS (
     d.REFERENCED_TYPE,
     1 AS LV
   FROM ALL_DEPENDENCIES d
-  WHERE d.OWNER = 'SECOPR'
+  WHERE d.OWNER = 'not_secopr'
     AND d.NAME IN (
       'SP_ROTATION_DAILY_REFRESH',
       'SP_RUN_SECTOR_ROT_BACKTEST',
@@ -209,7 +209,7 @@ ORDER BY LV, OWNER, NAME, REFERENCED_TYPE, REFERENCED_NAME;
 SELECT
   s.OWNER, s.NAME, s.TYPE, s.LINE, s.TEXT
 FROM ALL_SOURCE s
-WHERE s.OWNER = 'SECOPR'
+WHERE s.OWNER = 'not_secopr'
   AND s.NAME IN (
     'SP_ROTATION_DAILY_REFRESH',
     'SP_RUN_SECTOR_ROT_BACKTEST',
@@ -276,12 +276,15 @@ python app/tools/migrate_sp_doc_tables_views.py --apply
    - `docs/DDL/cn_market.sp_rotation_daily_refresh.sql`
 2. 该 SP 已在 `cn_market` 库创建并联调通过（`runner.py --tasks rotation`）。
 3. 已同步落地 L1 过程（MySQL）：
+   - `docs/DDL/cn_market.sp_build_sector_rotation_ranked_by_date.sql`
+   - `docs/DDL/cn_market.sp_build_sector_rotation_signal_by_date.sql`
    - `docs/DDL/cn_market.sp_build_sector_rotation_ranked_latest.sql`
    - `docs/DDL/cn_market.sp_build_sector_rotation_signal_latest.sql`
    - `docs/DDL/cn_market.sp_refresh_rotation_snap_all.sql`
 4. 当前编排关系：
-   - `SP_ROTATION_DAILY_REFRESH` -> `SP_BUILD_SECTOR_ROTATION_RANKED_LATEST`
-   - `SP_ROTATION_DAILY_REFRESH` -> `SP_BUILD_SECTOR_ROTATION_SIGNAL_LATEST`
+   - `SP_ROTATION_DAILY_REFRESH` -> `sp_refresh_sector_eod_hist (trade_date, trade_date, ...)`
+   - `SP_ROTATION_DAILY_REFRESH` -> `SP_BUILD_SECTOR_ROTATION_RANKED_BY_DATE`
+   - `SP_ROTATION_DAILY_REFRESH` -> `SP_BUILD_SECTOR_ROTATION_SIGNAL_BY_DATE`
    - `SP_ROTATION_DAILY_REFRESH` -> `SP_BACKFILL_ROT_BT_FROM_PRICE`
    - `SP_ROTATION_DAILY_REFRESH` -> `SP_REPAIR_ROT_BT_NAV`
    - `SP_ROTATION_DAILY_REFRESH` -> `SP_REFRESH_ROTATION_SNAP_ALL`

@@ -16,7 +16,7 @@ from app.utils.wireguard_helper import deactivate_tunnel
 
  
 
-SCHEMA_NAME = "SECOPR"
+SCHEMA_NAME = "not_secopr"
 TABLE_NAME = "CN_FUT_INDEX_HIS"
 
 create_table_sql = f"""

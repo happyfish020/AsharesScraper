@@ -12,6 +12,14 @@ class RunnerConfig:
     look_back_days: int = 20
     start_date: Optional[str] = None   # YYYYMMDD
     end_date: Optional[str] = None     # YYYYMMDD
+    his_start_date: Optional[str] = None   # YYYYMMDD (for his_stocks task)
+    his_end_date: Optional[str] = None     # YYYYMMDD (for his_stocks task)
+    his_source_order: str = "baostock,ak"
+    his_max_symbols: int = 0
+    his_symbols: List[str] = field(default_factory=list)
+    his_ignore_state: bool = False
+    his_alternate_bs_ak: bool = False
+    his_universe_frequency: str = "monthly"
 
     # universe
     manual_stock_symbols: List[str] = field(default_factory=list)
@@ -33,6 +41,8 @@ class RunnerConfig:
     etf_failed_file: Path = Path(os.path.join(root_dir, r"state\\ETF_failed.json"))
     opt_scanned_file: Path = Path(os.path.join(root_dir, r"state\\OPT_scanned.json"))
     opt_failed_file: Path = Path(os.path.join(root_dir, r"state\\OPT_failed.json"))
+    his_stock_scanned_file: Path = Path(os.path.join(root_dir, r"state\\HIS_STOCK_scanned.json"))
+    his_stock_failed_file: Path = Path(os.path.join(root_dir, r"state\\HIS_STOCK_failed.json"))
 
     
     

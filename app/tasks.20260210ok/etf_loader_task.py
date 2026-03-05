@@ -18,7 +18,7 @@ from app.utils.wireguard_helper import activate_tunnel, toggle_vpn
 ETF_HIST_TABLE = "CN_FUND_ETF_HIST_EM"
 
 
-SCHEMA_NAME = "SECOPR"
+SCHEMA_NAME = "not_secopr"
 
 etf_hist_sql = f"""
 CREATE TABLE {SCHEMA_NAME}.{ETF_HIST_TABLE} (

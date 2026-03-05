@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date, time as dt_time
@@ -12,6 +13,7 @@ import pandas as pd
 import pytz
 import baostock as bs
 import akshare as ak
+import requests
 from sqlalchemy import text
 
 #from price_loader import load_stock_price_eastmoney, normalize_stock_code
@@ -73,6 +75,7 @@ class StockLoaderTask:
                 ok = self._bulk_insert_latest_day_with_spot(latest_trading_date )
                 if ok:
                     self.log.info(f"最新交易日 {latest_trading_date} 已批量补齐，跳过个股逐只拉取")
+                    self._refresh_stock_active_universe_status()
                     return
                 self.log.info("全行情快照批量补齐失败，回退到原有逐只拉取逻辑")
             else:
@@ -104,8 +107,56 @@ class StockLoaderTask:
                 is_continue_load=True,
                 state_flush_every=cfg.state_flush_every,
             )
+            self._refresh_stock_active_universe_status()
         # if all ok then
         # call sp 
+
+    def _refresh_stock_active_universe_status(self) -> None:
+        enabled = str(os.getenv("STOCK_AUTO_REFRESH_ACTIVE_UNIVERSE", "1")).strip().lower()
+        if enabled in {"0", "false", "no", "off"}:
+            self.log.info("[STOCK] skip active-universe refresh by env STOCK_AUTO_REFRESH_ACTIVE_UNIVERSE")
+            return
+
+        recent_days = int(os.getenv("STOCK_ACTIVE_RECENT_DAYS", "30"))
+        min_trade_days = int(os.getenv("STOCK_ACTIVE_MIN_TRADE_DAYS", "1"))
+
+        try:
+            with self.engine.begin() as conn:
+                proc_exists = conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM information_schema.routines
+                        WHERE routine_schema = DATABASE()
+                          AND routine_type = 'PROCEDURE'
+                          AND routine_name = 'sp_refresh_stock_universe_status'
+                        """
+                    )
+                ).scalar()
+                if int(proc_exists or 0) <= 0:
+                    self.log.warning(
+                        "[STOCK] sp_refresh_stock_universe_status not found, skip active-universe refresh"
+                    )
+                    return
+
+                conn.execute(
+                    text(
+                        """
+                        CALL sp_refresh_stock_universe_status(
+                            NULL,
+                            :recent_days,
+                            :min_trade_days
+                        )
+                        """
+                    ),
+                    {"recent_days": recent_days, "min_trade_days": min_trade_days},
+                )
+
+            self.log.info(
+                f"[STOCK] active-universe refreshed: recent_days={recent_days}, min_trade_days={min_trade_days}"
+            )
+        except Exception as e:
+            self.log.warning(f"[STOCK] active-universe refresh failed: {e}")
 
     # RunnerApp refresh support
     def get_state_files(self, cfg):
@@ -127,7 +178,7 @@ class StockLoaderTask:
             except Exception:
                 pass
 
-        spot_df = ak.stock_zh_a_spot()
+        spot_df = self._fetch_spot_df_with_diagnostics()
         if spot_df is None or spot_df.empty:
             raise RuntimeError("ak.stock_zh_a_spot() empty; cannot build universe")
         spot_df = spot_df[~spot_df['代码'].str.startswith('bj')].copy()
@@ -141,6 +192,63 @@ class StockLoaderTask:
                 json.dump(out, f, ensure_ascii=False, indent=2)
         except Exception as e:
             self.log.warning(f"写入 universe cache 失败: {e}")
+
+        return out
+
+    def _probe_sina_spot_response_head(self) -> str:
+        try:
+            from akshare.stock.cons import zh_sina_a_stock_payload, zh_sina_a_stock_url
+        except Exception as e:
+            return f"probe_import_failed={e}"
+
+        try:
+            payload = zh_sina_a_stock_payload.copy()
+            payload.update({"page": "1"})
+            resp = requests.get(zh_sina_a_stock_url, params=payload, timeout=15)
+            head = (resp.text or "")[:200].encode("unicode_escape", "ignore").decode("ascii", "ignore")
+            return (
+                f"probe_status={resp.status_code}, "
+                f"probe_content_type={resp.headers.get('Content-Type')}, "
+                f"probe_body_head={head}"
+            )
+        except Exception as e:
+            return f"probe_request_failed={e}"
+
+    def _fetch_spot_df_with_diagnostics(self) -> pd.DataFrame | None:
+        try:
+            return ak.stock_zh_a_spot()
+        except Exception as e:
+            msg = str(e)
+            if "<" in msg or "decode value" in msg.lower():
+                diag = self._probe_sina_spot_response_head()
+                raise RuntimeError(f"ak.stock_zh_a_spot decode failed: {msg}; {diag}") from e
+            raise
+
+    def _sanitize_spot_rows_before_insert(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+
+        out = df.copy()
+        html_like = re.compile(r"<!doctype|<html|<[^>]+>", flags=re.IGNORECASE)
+
+        # Replace obvious HTML/error payload fragments in string columns.
+        for col in out.columns:
+            if out[col].dtype == object:
+                col_str = out[col].astype(str)
+                bad_mask = col_str.str.contains(html_like, na=False)
+                bad_cnt = int(bad_mask.sum())
+                if bad_cnt > 0:
+                    self.log.warning(f"[SPOT_SANITIZE] column={col} html_like_values={bad_cnt}, set to None")
+                    out.loc[bad_mask, col] = None
+
+        # Keep only valid 6-digit symbols.
+        if "symbol" in out.columns:
+            sym = out["symbol"].astype(str)
+            valid_mask = sym.str.fullmatch(r"\d{6}")
+            drop_cnt = int((~valid_mask).sum())
+            if drop_cnt > 0:
+                self.log.warning(f"[SPOT_SANITIZE] invalid_symbol_rows={drop_cnt}, dropped before insert")
+                out = out.loc[valid_mask].copy()
 
         return out
 
@@ -372,7 +480,7 @@ class StockLoaderTask:
 
     def _bulk_insert_latest_day_with_spot(self, latest_trading_date: str, ) -> bool:
         try:
-            spot_df = ak.stock_zh_a_spot()
+            spot_df = self._fetch_spot_df_with_diagnostics()
             if spot_df is None or spot_df.empty:
                 self.log.info("ak.stock_zh_a_spot() 返回空数据，批量补齐失败")
                 return False
@@ -429,6 +537,10 @@ class StockLoaderTask:
                 "amplitude","chg_pct","change","turnover_rate","source","window_start","exchange","name",
             ]
             missing_df = missing_df[table_cols]
+            missing_df = self._sanitize_spot_rows_before_insert(missing_df)
+            if missing_df.empty:
+                self.log.info("批量补齐前清洗后无可插入数据")
+                return False
 
             missing_df.to_sql("cn_stock_daily_price", self.engine, if_exists="append", index=False, chunksize=500)
             self.log.info(f"批量补齐完成：插入 {len(missing_df)} 条记录")

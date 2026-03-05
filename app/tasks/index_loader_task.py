@@ -2,11 +2,15 @@ from __future__ import annotations
 
  
 import random
+import json
+import re
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Set
 from datetime import date
+from urllib import request as urlrequest
 
 import pandas as pd
 import baostock as bs
@@ -14,7 +18,7 @@ import baostock as bs
 #from price_loader import load_index_price_em
 from app.tasks.db_accessor import DbAccessor
 from app.tasks.state_store import StateStore
-from app.utils.wireguard_helper import activate_tunnel, switch_wire_guard
+from app.utils.wireguard_helper import activate_tunnel, deactivate_tunnel, switch_wire_guard
 import akshare as ak 
 
 @dataclass
@@ -44,6 +48,7 @@ class IndexLoaderTask:
 
         #scanned = state.load_scanned()
         #failed = state.load_failed()
+        tmp_csv_dir = cfg.state_dir / "tmp_csv"
 
         for i, index_code in enumerate(indices, start=1):
             #if index_code in scanned:
@@ -57,7 +62,12 @@ class IndexLoaderTask:
                 existing = db.get_existing_index_days(index_code, cfg.start_date, cfg.end_date)
                  
                 if index_code =="sh000688":
-                    df = self.load_index_price_em( index_code, cfg.start_date, cfg.end_date)                
+                    df = self._load_sh000688_from_sohu_csv(
+                        index_code=index_code,
+                        start_date=cfg.start_date,
+                        end_date=cfg.end_date,
+                        tmp_csv_dir=tmp_csv_dir,
+                    )
                 else:
                     df = self._load_index_price_with_failover( index_code, cfg.start_date, cfg.end_date)
                 if df is None or df.empty:
@@ -83,7 +93,7 @@ class IndexLoaderTask:
             except Exception as e:
                 #failed.add(index_code)
                 self.log.info(f"FAILED index {index_code}: {e}")
-                sys.rasie(e)
+                #sys.rasie(e)
                 #try:
                 #    switch_wire_guard("cn")
                 #except Exception:
@@ -159,6 +169,126 @@ class IndexLoaderTask:
         self.log.info(f"[{stage}] ({cur}/{total} | {pct:6.2f}%) {symbol} {msg}")
 
 
+    @staticmethod
+    def _safe_float(v):
+        if v is None:
+            return None
+        s = str(v).strip().replace(",", "")
+        if not s or s == "--":
+            return None
+        s = s.replace("%", "")
+        try:
+            return float(s)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _extract_jsonp_payload(text: str):
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        if raw.startswith("[") or raw.startswith("{"):
+            return json.loads(raw)
+        m = re.search(r"^[^(]*\((.*)\)\s*;?\s*$", raw, flags=re.S)
+        if not m:
+            return None
+        return json.loads(m.group(1))
+
+    def _load_sh000688_from_sohu_csv(
+        self,
+        index_code: str,
+        start_date: str,
+        end_date: str,
+        tmp_csv_dir: Path,
+    ) -> pd.DataFrame | None:
+        code6 = str(index_code).strip().lower()
+        if code6.startswith(("sh", "sz")):
+            code6 = code6[2:]
+        start_fmt = pd.to_datetime(start_date).strftime("%Y%m%d")
+        end_fmt = pd.to_datetime(end_date).strftime("%Y%m%d")
+
+        page_url = f"https://q.stock.sohu.com/zs/{code6}/lshq.shtml"
+        api_url = (
+            "https://q.stock.sohu.com/hisHq"
+            f"?code=zs_{code6}&start={start_fmt}&end={end_fmt}"
+            "&stat=1&order=D&period=d&callback=historySearchHandler&rt=jsonp"
+        )
+        mode = "single-day" if start_fmt == end_fmt else "multi-day"
+        self.log.info(f"[INDEX][SOHU] {index_code} {mode} fetch from {page_url}")
+
+        req = urlrequest.Request(
+            api_url,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": page_url,
+            },
+        )
+        with urlrequest.urlopen(req, timeout=20) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+        payload = self._extract_jsonp_payload(body)
+        if not payload:
+            return None
+        data_obj = payload[0] if isinstance(payload, list) and payload else payload
+        hq_rows = data_obj.get("hq", []) if isinstance(data_obj, dict) else []
+        if not hq_rows:
+            return None
+
+        rows = []
+        for r in hq_rows:
+            if not isinstance(r, list) or len(r) < 3:
+                continue
+            trade_date = pd.to_datetime(str(r[0]), errors="coerce")
+            open_v = self._safe_float(r[1] if len(r) > 1 else None)
+            close_v = self._safe_float(r[2] if len(r) > 2 else None)
+            chg_pct_v = self._safe_float(r[4] if len(r) > 4 else None)
+            low_v = self._safe_float(r[5] if len(r) > 5 else None)
+            high_v = self._safe_float(r[6] if len(r) > 6 else None)
+            volume_v = self._safe_float(r[7] if len(r) > 7 else None)
+            amount_v = self._safe_float(r[8] if len(r) > 8 else None)
+            rows.append(
+                {
+                    "trade_date": trade_date,
+                    "open": open_v,
+                    "close": close_v,
+                    "high": high_v,
+                    "low": low_v,
+                    "volume": volume_v,
+                    "amount": amount_v,
+                    "chg_pct": chg_pct_v,
+                    "source": "sohu",
+                }
+            )
+        if not rows:
+            return None
+
+        df = pd.DataFrame(rows).dropna(subset=["trade_date", "close"]).copy()
+        if df.empty:
+            return None
+        df = df.sort_values("trade_date").reset_index(drop=True)
+        df["pre_close"] = df["close"].shift(1)
+        calc_chg_pct = ((df["close"] - df["pre_close"]) / df["pre_close"] * 100).round(4)
+        df["chg_pct"] = df["chg_pct"].where(df["chg_pct"].notna(), calc_chg_pct)
+        if not df.empty:
+            df.loc[0, "pre_close"] = None
+
+        tmp_csv_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = tmp_csv_dir / f"{index_code}_{start_fmt}_{end_fmt}_sohu.csv"
+        df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        self.log.info(f"[INDEX][SOHU] temp csv saved: {csv_path}")
+
+        csv_df = pd.read_csv(csv_path)
+        csv_df["trade_date"] = pd.to_datetime(csv_df["trade_date"], errors="coerce")
+        for col in ["open", "close", "high", "low", "volume", "amount", "pre_close", "chg_pct"]:
+            if col in csv_df.columns:
+                csv_df[col] = pd.to_numeric(csv_df[col], errors="coerce")
+
+        keep = ["trade_date", "open", "close", "high", "low", "volume", "amount", "source", "pre_close", "chg_pct"]
+        for c in keep:
+            if c not in csv_df.columns:
+                csv_df[c] = None
+        return csv_df[keep].dropna(subset=["trade_date", "close"]).copy()
+
+
 
 
     def load_index_price_em( self,
@@ -180,9 +310,9 @@ class IndexLoaderTask:
         if not isinstance(index_code, str) or not index_code.strip():
             raise ValueError("index_code must be non-empty str")
     
-        max_retries = 1
+        max_retries = 0
         for attempt in range(1, max_retries + 1):
-            #deactivate_tunnel("cn")
+            deactivate_tunnel("cn")
             #LOG.info("deactivate_tunnel - in load_index_price_em")
              
             #activate_tunnel("cn")

@@ -15,7 +15,7 @@ from app.utils.wireguard_helper import switch_wire_guard
 # ==============================
 OPTION_DAILY_TABLE = "CN_OPTION_SSE_DAILY"
 
-SCHEMA_NAME = "SECOPR"
+SCHEMA_NAME = "not_secopr"
 
 
 

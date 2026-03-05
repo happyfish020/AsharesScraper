@@ -25,8 +25,12 @@ proc: BEGIN
         DO 1;
     END IF;
 
-    CALL SP_BUILD_SECTOR_ROTATION_RANKED_LATEST();
-    CALL SP_BUILD_SECTOR_ROTATION_SIGNAL_LATEST();
+    -- Incremental sector index-level facts for exact trade_date.
+    CALL sp_refresh_sector_eod_hist(v_trade_date, v_trade_date, 0.30, 0.60);
+
+    -- Incremental rotation signal/ranked for exact trade_date.
+    CALL SP_BUILD_SECTOR_ROTATION_RANKED_BY_DATE(v_trade_date);
+    CALL SP_BUILD_SECTOR_ROTATION_SIGNAL_BY_DATE(v_trade_date);
     CALL SP_BACKFILL_ROT_BT_FROM_PRICE(v_run_id, v_trade_date, IFNULL(p_force, 0));
     CALL SP_REPAIR_ROT_BT_NAV(v_run_id, 1.0000000000);
     CALL SP_REFRESH_ROTATION_SNAP_ALL(v_run_id, v_trade_date, IFNULL(p_force, 0));

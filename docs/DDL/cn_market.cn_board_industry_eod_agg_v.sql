@@ -1,64 +1,69 @@
 -- cn_market.cn_board_industry_eod_agg_v source
--- Performance-oriented rewrite:
--- 1) treat CN_BOARD_INDUSTRY_CONS as snapshot dimension and use latest ASOF_DATE
--- 2) limit price scan to recent 360 trading days window for daily signal use
+-- History-safe version using daily mapping table generated from valid_from/valid_to.
 
 create or replace
 algorithm = UNDEFINED view `cn_board_industry_eod_agg_v` as
-with `asof_anchor` as (
-select
-    max(`c`.`ASOF_DATE`) as `max_asof_date`
-from
-    `cn_board_industry_cons` `c`),
-`date_anchor` as (
-select
-    max(`p`.`TRADE_DATE`) as `max_trade_date`
-from
-    `cn_stock_daily_price` `p`),
-`cons_latest` as (
-select
-    `c`.`BOARD_ID` as `board_id`,
-    `c`.`SYMBOL` as `symbol`
-from
-    `cn_board_industry_cons` `c`
-join `asof_anchor` `a` on
-    (`c`.`ASOF_DATE` = `a`.`max_asof_date`)),
-`px` as (
-select
-    `p`.`SYMBOL` as `symbol`,
-    `p`.`TRADE_DATE` as `trade_date`,
-    `p`.`AMOUNT` as `amount`,
-    (case
-        when ((coalesce(`p`.`PRE_CLOSE`, (`p`.`CLOSE` - `p`.`change`)) is not null)
-            and (coalesce(`p`.`PRE_CLOSE`, (`p`.`CLOSE` - `p`.`change`)) <> 0)) then ((`p`.`CLOSE` / coalesce(`p`.`PRE_CLOSE`, (`p`.`CLOSE` - `p`.`change`))) - 1)
-        when (`p`.`CHG_PCT` is not null) then (case
-            when (abs(`p`.`CHG_PCT`) > 1) then (`p`.`CHG_PCT` / 100)
-            else `p`.`CHG_PCT`
-        end)
-        else null
-    end) as `ret_eff`
-from
-    `cn_stock_daily_price` `p`
-where
-    (`p`.`TRADE_DATE` >= (
-    select
-        `d`.`max_trade_date`
-    from
-        `date_anchor` `d`)))
 select
     'INDUSTRY' as `sector_type`,
-    `c`.`board_id` as `sector_id`,
+    `m`.`sector_id` as `sector_id`,
     `p`.`trade_date` as `trade_date`,
     count(0) as `members`,
     sum(ifnull(`p`.`amount`, 0)) as `amount_sum`,
-    avg(`p`.`ret_eff`) as `avg_ret`,
-    avg(`p`.`ret_eff`) as `median_ret`,
-    avg(`p`.`ret_eff`) as `eqw_ret`,
-    avg((case when (`p`.`ret_eff` is null) then null when (`p`.`ret_eff` > 0) then 1 else 0 end)) as `up_ratio`
+    avg((case
+        when ((coalesce(`p`.`pre_close`, (`p`.`close` - `p`.`change`)) is not null)
+            and (coalesce(`p`.`pre_close`, (`p`.`close` - `p`.`change`)) <> 0)) then ((`p`.`close` / coalesce(`p`.`pre_close`, (`p`.`close` - `p`.`change`))) - 1)
+        when (`p`.`chg_pct` is not null) then (case
+            when (abs(`p`.`chg_pct`) > 1) then (`p`.`chg_pct` / 100)
+            else `p`.`chg_pct`
+        end)
+        else null
+    end)) as `avg_ret`,
+    avg((case
+        when ((coalesce(`p`.`pre_close`, (`p`.`close` - `p`.`change`)) is not null)
+            and (coalesce(`p`.`pre_close`, (`p`.`close` - `p`.`change`)) <> 0)) then ((`p`.`close` / coalesce(`p`.`pre_close`, (`p`.`close` - `p`.`change`))) - 1)
+        when (`p`.`chg_pct` is not null) then (case
+            when (abs(`p`.`chg_pct`) > 1) then (`p`.`chg_pct` / 100)
+            else `p`.`chg_pct`
+        end)
+        else null
+    end)) as `median_ret`,
+    avg((case
+        when ((coalesce(`p`.`pre_close`, (`p`.`close` - `p`.`change`)) is not null)
+            and (coalesce(`p`.`pre_close`, (`p`.`close` - `p`.`change`)) <> 0)) then ((`p`.`close` / coalesce(`p`.`pre_close`, (`p`.`close` - `p`.`change`))) - 1)
+        when (`p`.`chg_pct` is not null) then (case
+            when (abs(`p`.`chg_pct`) > 1) then (`p`.`chg_pct` / 100)
+            else `p`.`chg_pct`
+        end)
+        else null
+    end)) as `eqw_ret`,
+    avg((case
+        when ((case
+            when ((coalesce(`p`.`pre_close`, (`p`.`close` - `p`.`change`)) is not null)
+                and (coalesce(`p`.`pre_close`, (`p`.`close` - `p`.`change`)) <> 0)) then ((`p`.`close` / coalesce(`p`.`pre_close`, (`p`.`close` - `p`.`change`))) - 1)
+            when (`p`.`chg_pct` is not null) then (case
+                when (abs(`p`.`chg_pct`) > 1) then (`p`.`chg_pct` / 100)
+                else `p`.`chg_pct`
+            end)
+            else null
+        end) is null) then null
+        when ((case
+            when ((coalesce(`p`.`pre_close`, (`p`.`close` - `p`.`change`)) is not null)
+                and (coalesce(`p`.`pre_close`, (`p`.`close` - `p`.`change`)) <> 0)) then ((`p`.`close` / coalesce(`p`.`pre_close`, (`p`.`close` - `p`.`change`))) - 1)
+            when (`p`.`chg_pct` is not null) then (case
+                when (abs(`p`.`chg_pct`) > 1) then (`p`.`chg_pct` / 100)
+                else `p`.`chg_pct`
+            end)
+            else null
+        end) > 0) then 1
+        else 0
+    end)) as `up_ratio`
 from
-    (`cons_latest` `c`
-join `px` `p` on
-    ((`p`.`symbol` = `c`.`symbol`)))
+    (`cn_board_member_map_d` `m`
+join `cn_stock_daily_price_active_v` `p` on
+    ((`p`.`trade_date` = `m`.`trade_date`)
+        and (`p`.`symbol` = (`m`.`symbol` collate utf8mb4_unicode_ci))))
+where
+    (`m`.`sector_type` = 'INDUSTRY')
 group by
-    `c`.`board_id`,
+    `m`.`sector_id`,
     `p`.`trade_date`;

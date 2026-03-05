@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import calendar
+import re
+from datetime import datetime, timedelta
 from typing import List, Optional
 from sqlalchemy import text
 
@@ -22,16 +25,55 @@ from app.tasks.index_loader_task import IndexLoaderTask
 from app.tasks.futures_loader_task import FuturesLoaderTask
 from app.tasks.options_loader_task import OptionsLoaderTask
 from app.tasks.coverage_audit_task import CoverageAuditTask
+from app.tasks.his_stocks_loader_task import HisStocksLoaderTask
+from app.tasks.board_membership_refresh_task import BoardMembershipRefreshTask
 
 
 def _parse_args(argv: Optional[List[str]] = None):
     p = argparse.ArgumentParser(description="AsharesScraper Runner")
     p.add_argument("--asof", default="latest", help="run as-of trading day: latest or YYYYMMDD")
     p.add_argument("--days", type=int, default=1, help="lookback window days (used when --asof=latest and you want backfill)")
-    p.add_argument("--tasks", default="stock", help="comma-separated: stock,etf,index,futures,options,audit,all")
+    p.add_argument("--tasks", default="stock", help="comma-separated: stock,his_stocks,board,rotation,etf,index,futures,options,audit,all")
+    p.add_argument("--history-start", default="20000101", help="his_stocks only: YYYYMMDD or YYYY-MM")
+    p.add_argument("--history-end", default="latest", help="his_stocks only: latest or YYYYMMDD or YYYY-MM")
+    p.add_argument("--history-source-order", default="baostock,ak", help="his_stocks only: comma-separated source priority, default baostock,ak")
+    p.add_argument("--history-max-symbols", type=int, default=0, help="his_stocks only: limit symbols for smoke test; 0 means all")
+    p.add_argument("--history-symbols", default="", help="his_stocks only: comma-separated symbols, e.g. 000001,600000; when set, skip universe scan")
+    p.add_argument("--history-ignore-state", action="store_true", help="his_stocks only: ignore scanned/failed state and force re-check")
+    p.add_argument("--history-alternate-bs-ak", action="store_true", help="his_stocks only: odd symbol->baostock first, even symbol->ak first")
+    p.add_argument("--history-universe-frequency", default="monthly", choices=["monthly", "weekly"], help="his_stocks only: anchor frequency for query_all_stock(date)")
     p.add_argument("--refresh", action="store_true", help="clear state files and refresh")
     p.add_argument("--no-vpn", action="store_true", help="skip wireguard start/stop")
     return p.parse_args(argv)
+
+
+def _normalize_history_date(raw: str, asof: str, is_end: bool) -> str:
+    s = str(raw or "").strip()
+    low = s.lower()
+    if low == "latest":
+        return asof
+
+    if re.fullmatch(r"\d{8}", s):
+        datetime.strptime(s, "%Y%m%d")
+        return s
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        dt = datetime.strptime(s, "%Y-%m-%d")
+        return dt.strftime("%Y%m%d")
+
+    ym = None
+    if re.fullmatch(r"\d{6}", s):
+        ym = (int(s[:4]), int(s[4:6]))
+    elif re.fullmatch(r"\d{4}-\d{2}", s):
+        ym = tuple(map(int, s.split("-")))
+
+    if ym is None:
+        raise SystemExit(f"Invalid history date format: {raw}. Expected latest, YYYYMMDD, or YYYY-MM.")
+
+    y, m = ym
+    if m < 1 or m > 12:
+        raise SystemExit(f"Invalid month in history date: {raw}")
+    day = calendar.monthrange(y, m)[1] if is_end else 1
+    return f"{y:04d}{m:02d}{day:02d}"
 
 
 def run(argv: Optional[List[str]] = None) -> None:
@@ -63,15 +105,22 @@ def run(argv: Optional[List[str]] = None) -> None:
     else:
        log.info("wireguard: stop")
        deactivate_tunnel("cn")
+    raw = (args.tasks or "stock").strip().lower()
+    selected = []
+    if raw in ("all", "*"):
+        selected = ["stock", "board", "rotation", "etf", "index", "futures", "options", "audit"]
+    else:
+        selected = [t.strip() for t in raw.split(",") if t.strip()]
+
     # resolve asof date
     if isinstance(args.asof, str) and args.asof.lower() == "latest":
         asof = get_latest_trade_date()
     else:
         asof = str(args.asof).strip()
 
-    # RunnerConfig: keep tasks logic unchanged; we just drive an asof-centric window
-    # - start_date=end_date=asof for true daily run
-    # - if user wants backfill, they can pass --days and we set start based on finalize_dates
+    # RunnerConfig: drive an asof-centric window.
+    # - --asof YYYYMMDD: strict single-day
+    # - --asof latest --days N: multi-day backfill [asof-(N-1), asof]
     cfg = RunnerConfig(
         look_back_days=args.days,
         manual_stock_symbols=[],
@@ -80,17 +129,41 @@ def run(argv: Optional[List[str]] = None) -> None:
         refresh_state=args.refresh,
     )
 
-    # If user explicitly targets a day, make runner strictly daily and clean.
+    # If user explicitly targets a day, keep strict single-day.
     if asof and asof != "latest":
         cfg.start_date = asof
         cfg.end_date = asof
     else:
-        # latest
-        cfg.start_date = asof
+        # latest with 1-day or multi-day option
         cfg.end_date = asof
+        if args.days and args.days > 1:
+            asof_dt = datetime.strptime(asof, "%Y%m%d")
+            cfg.start_date = (asof_dt - timedelta(days=args.days - 1)).strftime("%Y%m%d")
+        else:
+            cfg.start_date = asof
+
+    if "his_stocks" in selected:
+        history_start = _normalize_history_date(args.history_start, asof, is_end=False)
+        history_end = _normalize_history_date(args.history_end, asof, is_end=True)
+        if history_start > history_end:
+            raise SystemExit(f"history window invalid: {history_start} > {history_end}")
+
+        cfg.his_start_date = history_start
+        cfg.his_end_date = history_end
+        cfg.his_source_order = str(args.history_source_order).strip().lower()
+        cfg.his_max_symbols = max(0, int(args.history_max_symbols))
+        raw_symbols = str(args.history_symbols).replace(",", " ").split()
+        cfg.his_symbols = [s.strip() for s in raw_symbols if s.strip()]
+        cfg.his_ignore_state = bool(args.history_ignore_state)
+        cfg.his_alternate_bs_ak = bool(args.history_alternate_bs_ak)
+        cfg.his_universe_frequency = str(args.history_universe_frequency).strip().lower()
+        cfg.start_date = history_start
+        cfg.end_date = history_end
 
     tasks_map = {
         "stock": StockLoaderTask,
+        "his_stocks": HisStocksLoaderTask,
+        "board": BoardMembershipRefreshTask,
         "etf": EtfLoaderTask,
         "index": IndexLoaderTask,
         "futures": FuturesLoaderTask,
@@ -99,19 +172,14 @@ def run(argv: Optional[List[str]] = None) -> None:
         "rotation": SectorRotationSnapshotTask,
     }
 
-    # DbInitTask is always executed first
-    tasks = [DbInitTask()]
-
-    raw = (args.tasks or "stock").strip().lower()
-    selected = []
-    if raw in ("all", "*"):
-        selected = ["stock", "etf", "index", "futures", "options", "audit"]
-    else:
-        selected = [t.strip() for t in raw.split(",") if t.strip()]
-
     unknown = [t for t in selected if t not in tasks_map]
     if unknown:
         raise SystemExit(f"Unknown task(s): {unknown}. Allowed: {sorted(tasks_map.keys())} or 'all'.")
+    if "his_stocks" in selected and len(selected) > 1:
+        raise SystemExit("Task 'his_stocks' must run alone for safety. Example: --tasks his_stocks")
+
+    # DbInitTask is always executed first
+    tasks = [DbInitTask()]
 
     engine = build_engine()
     # Force an early MySQL connectivity check so failures are explicit at startup.
@@ -121,7 +189,7 @@ def run(argv: Optional[List[str]] = None) -> None:
     ctx = RunContext(config=cfg, engine=engine, log=log)
 
     # Preserve a stable execution order + rotation
-    order = ["stock", "rotation", "etf", "index", "futures", "options", "audit"]
+    order = ["his_stocks", "stock", "board", "rotation", "etf", "index", "futures", "options", "audit"]
     for name in order:
         if name in selected:
             tasks.append(tasks_map[name]())
