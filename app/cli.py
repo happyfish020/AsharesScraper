@@ -27,20 +27,27 @@ from app.tasks.options_loader_task import OptionsLoaderTask
 from app.tasks.coverage_audit_task import CoverageAuditTask
 from app.tasks.his_stocks_loader_task import HisStocksLoaderTask
 from app.tasks.board_membership_refresh_task import BoardMembershipRefreshTask
+from app.tasks.stock_basic_weekly_task import StockBasicWeeklyTask
+from app.tasks.stock_fundamental_monthly_task import StockFundamentalMonthlyTask
+from app.tasks.stock_quality_snapshot_task import StockQualitySnapshotTask
+from app.tasks.stock_working_capital_alert_task import StockWorkingCapitalAlertTask
+from app.tasks.inst_fund_hold_summary_task import InstFundHoldSummaryTask
+from app.tasks.event_loader_task import EventLoaderTask
 
 
 def _parse_args(argv: Optional[List[str]] = None):
     p = argparse.ArgumentParser(description="AsharesScraper Runner")
     p.add_argument("--asof", default="latest", help="run as-of trading day: latest or YYYYMMDD")
     p.add_argument("--days", type=int, default=1, help="lookback window days (used when --asof=latest and you want backfill)")
-    p.add_argument("--tasks", default="stock", help="comma-separated: stock,his_stocks,board,rotation,etf,index,futures,options,audit,all")
+    p.add_argument("--flag", default="tu", choices=["tu", "ak"], help="data source flag: tu=tushare (default), ak=akshare")
+    p.add_argument("--tasks", default="stock", help="comma-separated: stock,his_stocks,board,stock_basic,stock_fundamental,stock_quality_snapshot,stock_working_capital,inst_fund_hold,rotation,etf,index,futures,options,event,event_daily,event_periodic,audit,all")
     p.add_argument("--history-start", default="20000101", help="his_stocks only: YYYYMMDD or YYYY-MM")
     p.add_argument("--history-end", default="latest", help="his_stocks only: latest or YYYYMMDD or YYYY-MM")
-    p.add_argument("--history-source-order", default="baostock,ak", help="his_stocks only: comma-separated source priority, default baostock,ak")
+    p.add_argument("--history-source-order", default="ak,yf", help="his_stocks only: comma-separated source priority, default ak,yf")
     p.add_argument("--history-max-symbols", type=int, default=0, help="his_stocks only: limit symbols for smoke test; 0 means all")
     p.add_argument("--history-symbols", default="", help="his_stocks only: comma-separated symbols, e.g. 000001,600000; when set, skip universe scan")
     p.add_argument("--history-ignore-state", action="store_true", help="his_stocks only: ignore scanned/failed state and force re-check")
-    p.add_argument("--history-alternate-bs-ak", action="store_true", help="his_stocks only: odd symbol->baostock first, even symbol->ak first")
+    p.add_argument("--history-alternate-bs-ak", action="store_true", help="his_stocks only: deprecated compatibility flag; no effect")
     p.add_argument("--history-universe-frequency", default="monthly", choices=["monthly", "weekly"], help="his_stocks only: anchor frequency for query_all_stock(date)")
     p.add_argument("--refresh", action="store_true", help="clear state files and refresh")
     p.add_argument("--no-vpn", action="store_true", help="skip wireguard start/stop")
@@ -105,10 +112,14 @@ def run(argv: Optional[List[str]] = None) -> None:
     else:
        log.info("wireguard: stop")
        deactivate_tunnel("cn")
+
+
+ 
+
     raw = (args.tasks or "stock").strip().lower()
     selected = []
     if raw in ("all", "*"):
-        selected = ["stock", "board", "rotation", "etf", "index", "futures", "options", "audit"]
+        selected = ["stock", "board", "stock_basic", "stock_fundamental", "inst_fund_hold", "rotation", "etf", "index", "futures", "options", "event_daily", "event_periodic", "audit"]
     else:
         selected = [t.strip() for t in raw.split(",") if t.strip()]
 
@@ -128,11 +139,16 @@ def run(argv: Optional[List[str]] = None) -> None:
         base_index=DEFAULT_BASE_INDEX,
         refresh_state=args.refresh,
     )
+    cfg.data_source_flag = str(args.flag or "tu").strip().lower()
 
-    # If user explicitly targets a day, keep strict single-day.
+    # If user explicitly targets a day, allow multi-day window when --days > 1.
     if asof and asof != "latest":
-        cfg.start_date = asof
         cfg.end_date = asof
+        if args.days and args.days > 1:
+            asof_dt = datetime.strptime(asof, "%Y%m%d")
+            cfg.start_date = (asof_dt - timedelta(days=args.days - 1)).strftime("%Y%m%d")
+        else:
+            cfg.start_date = asof
     else:
         # latest with 1-day or multi-day option
         cfg.end_date = asof
@@ -164,6 +180,14 @@ def run(argv: Optional[List[str]] = None) -> None:
         "stock": StockLoaderTask,
         "his_stocks": HisStocksLoaderTask,
         "board": BoardMembershipRefreshTask,
+        "stock_basic": StockBasicWeeklyTask,
+        "stock_fundamental": StockFundamentalMonthlyTask,
+        "stock_quality_snapshot": StockQualitySnapshotTask,
+        "stock_working_capital": StockWorkingCapitalAlertTask,
+        "inst_fund_hold": InstFundHoldSummaryTask,
+        "event": EventLoaderTask,
+        "event_daily": lambda: EventLoaderTask(name="EventLoaderDaily", frequency_tag="daily"),
+        "event_periodic": lambda: EventLoaderTask(name="EventLoaderPeriodic", frequency_tag="periodic"),
         "etf": EtfLoaderTask,
         "index": IndexLoaderTask,
         "futures": FuturesLoaderTask,
@@ -189,7 +213,7 @@ def run(argv: Optional[List[str]] = None) -> None:
     ctx = RunContext(config=cfg, engine=engine, log=log)
 
     # Preserve a stable execution order + rotation
-    order = ["his_stocks", "stock", "board", "rotation", "etf", "index", "futures", "options", "audit"]
+    order = ["his_stocks", "stock", "board", "stock_basic", "stock_fundamental", "stock_quality_snapshot", "stock_working_capital", "inst_fund_hold", "rotation", "event", "event_daily", "event_periodic", "etf", "index", "futures", "options", "audit"]
     for name in order:
         if name in selected:
             tasks.append(tasks_map[name]())

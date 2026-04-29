@@ -13,13 +13,14 @@ from datetime import date
 from urllib import request as urlrequest
 
 import pandas as pd
-import baostock as bs
 
 #from price_loader import load_index_price_em
 from app.tasks.db_accessor import DbAccessor
 from app.tasks.state_store import StateStore
 from app.utils.wireguard_helper import activate_tunnel, deactivate_tunnel, switch_wire_guard
 import akshare as ak 
+import tushare as ts
+from app.tools.sync_cn_stock_daily_price_from_tushare import resolve_tushare_token, patch_pandas_fillna_method_compat
 
 @dataclass
 class IndexLoaderTask:
@@ -29,6 +30,9 @@ class IndexLoaderTask:
         cfg = ctx.config
         self.log = ctx.log
         self.engine=ctx.engine
+        self.data_source_flag = str(getattr(cfg, "data_source_flag", "tu") or "tu").strip().lower()
+        self._ts_pro = None
+        self._ts_token = None
 
         db = DbAccessor(ctx.engine, self.log)
         #state = StateStore(cfg.state_dir / "index_scanned.json", cfg.state_dir / "index_failed.json", self.log)
@@ -38,13 +42,20 @@ class IndexLoaderTask:
             self.log.warning("[INDEX] index_symbols 为空，跳过指数加载")
             return
 
-        self.log.info(f"[START][INDEX] window={cfg.start_date}~{cfg.end_date} | indices={len(indices)}")
+        self.log.info(f"[START][INDEX] window={cfg.start_date}~{cfg.end_date} | indices={len(indices)} | source={self.data_source_flag}")
+        if self.data_source_flag == "tu":
+            try:
+                patch_pandas_fillna_method_compat()
+                token, tried_files = resolve_tushare_token("", "")
+                self._ts_token = token.strip() if token else ""
+                if not self._ts_token:
+                    msg = "[INDEX] Tushare token not found"
+                    if tried_files:
+                        msg += f"; tried_files={', '.join(str(p) for p in tried_files)}"
+                    raise RuntimeError(msg)
+            except Exception as e:
+                raise RuntimeError(f"[INDEX] initialize tushare failed: {e}") from e
         activate_tunnel("cn")
-        lg = bs.login()
-        if lg.error_code != '0':
-            self.log.error(f"baostock login failed: {lg.error_msg}")
-        else:
-            self.log.info("baostock login success (global for index batch)")
 
         #scanned = state.load_scanned()
         #failed = state.load_failed()
@@ -102,67 +113,64 @@ class IndexLoaderTask:
 
             time.sleep(random.uniform(0.3, 0.8))
 
-        try:
-            bs.logout()
-        except Exception:
-            pass
-        self.log.info("baostock logout (index)")
-
         #state.save_scanned(scanned)
         #state.save_failed(failed)
         self.log.info("[DONE][INDEX] loader finished")
 
     # ------------------------
     def _load_index_price_with_failover(self,   index_code: str, start_date: str, end_date: str) -> pd.DataFrame | None:
-        df = self._load_index_price_baostock_internal( index_code, start_date, end_date)
-        if df is not None and not df.empty:
-            return df
-        self.log.warning(f"baostock failed for index {index_code}, switching to eastmoney")
+        if self.data_source_flag == "tu":
+            return self._load_index_price_tushare(index_code, start_date, end_date)
         return self.load_index_price_em(index_code=index_code, start_date=start_date, end_date=end_date)
 
-    def _load_index_price_baostock_internal(self,   index_code: str, start_date: str, end_date: str) -> pd.DataFrame | None:
+    def _load_index_price_tushare(self, index_code: str, start_date: str, end_date: str) -> pd.DataFrame | None:
+        if not self._ts_token:
+            return None
+        if self._ts_pro is None:
+            self._ts_pro = ts.pro_api(self._ts_token)
+
         code_clean = str(index_code).strip().lower()
-        # accept sh000300/sz399001 OR 000300/399001
-        if code_clean.startswith("sh") or code_clean.startswith("sz"):
+        if code_clean.startswith(("sh", "sz")) and len(code_clean) >= 8:
             code6 = code_clean[2:]
-            prefix = code_clean[:2]
+            sfx = code_clean[:2].upper()
         else:
             code6 = code_clean
-            # crude heuristic
-            prefix = "sz" if code6.startswith(("0","3")) else "sh"
-        symbol = f"{prefix}.{code6}"
+            sfx = "SZ" if code6.startswith(("0", "3")) else "SH"
+        ts_code = f"{code6}.{sfx}"
 
-        fields = "date,open,high,low,close,preclose,volume,amount,pctChg"
-        rs = bs.query_history_k_data_plus(
-            symbol,
-            fields=fields,
-            start_date=pd.to_datetime(start_date).strftime("%Y-%m-%d"),
-            end_date=pd.to_datetime(end_date).strftime("%Y-%m-%d"),
-            frequency="d",
-            adjustflag="1",
+        df = self._ts_pro.index_daily(
+            ts_code=ts_code,
+            start_date=pd.to_datetime(start_date).strftime("%Y%m%d"),
+            end_date=pd.to_datetime(end_date).strftime("%Y%m%d"),
         )
-        if rs.error_code != '0':
-            self.log.warning(f"baostock query failed {symbol}: {rs.error_msg}")
+        if df is None or df.empty:
             return None
 
-        data = []
-        while rs.next():
-            data.append(rs.get_row_data())
-        if not data:
-            return None
-
-        df = pd.DataFrame(data, columns=fields.split(","))
-        df["trade_date"] = pd.to_datetime(df["date"])
-        df.rename(columns={
-            "preclose": "pre_close",
-            "pctChg": "chg_pct",
-        }, inplace=True)
-        for col in ["open","high","low","close","pre_close","volume","amount","chg_pct"]:
+        df = df.rename(
+            columns={
+                "trade_date": "trade_date",
+                "pre_close": "pre_close",
+                "pct_chg": "chg_pct",
+                "vol": "volume",
+            }
+        )
+        df["trade_date"] = pd.to_datetime(df["trade_date"], format="%Y%m%d", errors="coerce")
+        for col in ["open", "close", "high", "low", "pre_close", "volume", "amount", "chg_pct"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
-        df["source"] = "baostock"
+        df = df.sort_values("trade_date").reset_index(drop=True)
+        df["source"] = "tushare"
+
         keep = ["trade_date","open","close","high","low","volume","amount","source","pre_close","chg_pct"]
-        return df[keep]
+        for c in keep:
+            if c not in df.columns:
+                df[c] = None
+        out = df[keep].dropna(subset=["trade_date"]).copy()
+        quote_cols = ["open", "close", "high", "low", "pre_close", "volume", "amount", "chg_pct"]
+        out = out.loc[out[quote_cols].notna().any(axis=1)].copy()
+        if out.empty:
+            return None
+        return out
 
     def _log_progress(self,  stage: str, cur: int, total: int, symbol: str, msg: str) -> None:
         pct = (cur / total) * 100 if total else 0
@@ -310,7 +318,7 @@ class IndexLoaderTask:
         if not isinstance(index_code, str) or not index_code.strip():
             raise ValueError("index_code must be non-empty str")
     
-        max_retries = 0
+        max_retries = 3
         for attempt in range(1, max_retries + 1):
             deactivate_tunnel("cn")
             #LOG.info("deactivate_tunnel - in load_index_price_em")
@@ -354,7 +362,15 @@ class IndexLoaderTask:
                 for c in keep_cols:
                     if c not in df.columns:
                         df[c] = None
-                return df[keep_cols]
+                out = df[keep_cols].dropna(subset=["trade_date"]).copy()
+                quote_cols = ["open", "close", "high", "low", "pre_close", "volume", "amount", "chg_pct"]
+                out = out.loc[out[quote_cols].notna().any(axis=1)].copy()
+                if out.empty:
+                    if attempt == max_retries:
+                        return None
+                    time.sleep(1.0)
+                    continue
+                return out
     
             except Exception as e:
                 if attempt == max_retries:

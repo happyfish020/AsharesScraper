@@ -516,3 +516,89 @@ p_force = 1（想覆盖就 1，不覆盖就 0）
 p_refresh_energy = 0
 
 --------
+
+Event 数据采集（Tushare Pro）
+
+运行入口：
+
+python runner.py --tasks event --asof latest --days 1
+
+详细说明见 docs/Runbook_event.md
+
+---
+
+# Financial Module Updates
+
+## New Financial Objects
+
+- `cn_stock_balancesheet`
+- `cn_stock_working_capital_alert_v1`
+- `StockWorkingCapitalAlertTask`
+
+## What Was Added
+
+- Tushare `balancesheet` data now lands into `cn_stock_balancesheet`
+- monthly fundamental task now maintains:
+  - `cn_stock_income`
+  - `cn_stock_balancesheet`
+  - `cn_stock_fina_indicator`
+- working-capital anomaly detection is now a first-class task:
+  - task name: `stock_working_capital`
+  - view name: `cn_stock_working_capital_alert_v1`
+
+## Task Entry Points
+
+Full financial sync:
+
+```powershell
+python runner.py --tasks stock_fundamental --asof latest
+```
+
+Refresh only working-capital alerts:
+
+```powershell
+python runner.py --tasks stock_working_capital --asof latest
+```
+
+## Full Backfill From 2010
+
+Use the financial monthly task first, then refresh the alert view:
+
+```powershell
+$env:STOCK_FUNDAMENTAL_MONTHLY_HISTORY_START="20100101"
+$env:STOCK_FUNDAMENTAL_MONTHLY_FORCE="1"
+$env:STOCK_FUNDAMENTAL_MONTHLY_FULL_REBUILD="1"
+python runner.py --tasks stock_fundamental --asof latest
+```
+
+Notes:
+
+- `stock_fundamental` already refreshes the working-capital view at the end
+- `stock_working_capital` itself does not pull raw Tushare statements
+- it reads existing data from:
+  - `cn_stock_balancesheet`
+  - `cn_stock_income`
+  - `cn_stock_fina_indicator`
+
+## Current Working-Capital Rules
+
+The current alert view marks anomalies when:
+
+- `accounts_receiv_yoy_pct > revenue_yoy_pct`
+- `inventories_yoy_pct > revenue_yoy_pct`
+
+Key output fields:
+
+- `accounts_receiv_yoy_pct`
+- `inventories_yoy_pct`
+- `revenue_yoy_pct`
+- `receiv_growth_gap_pct`
+- `inventory_growth_gap_pct`
+- `working_capital_alert_score`
+- `working_capital_alert_level`
+
+## Docs
+
+- design: `docs/stock_fundamental_monthly_design.md`
+- runbook: `docs/Runbook_stock_working_capital.md`
+- fetch strategy: `docs/api_fetch_strategy.md`

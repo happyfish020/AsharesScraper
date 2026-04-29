@@ -182,6 +182,48 @@ Notes:
 2. Rebuilds `cn_board_member_map_d` for the selected range after import.
 3. Available concept history starts from source availability (not necessarily 2000).
 
+## Stock Price History From Tushare (OHLC)
+
+Script:
+
+- `app/tools/sync_cn_stock_daily_price_from_tushare.py`
+
+Notes:
+
+1. This is the Tushare-based historical loader for `cn_stock_daily_price`.
+2. It fetches qfq daily bars via `ts.pro_bar(..., asset="E", freq="D")`.
+3. Loader now ensures `cn_stock_daily_price` contains `OPEN`, `CLOSE`, `PRE_CLOSE`, `HIGH`, `LOW` before upsert.
+4. Manual DDL fallback: `docs/DDL/cn_market.alter_cn_stock_daily_price_add_ohlc.sql`
+5. For targeted repair of existing rows with missing OHLC, use `--missing-ohlc-only`.
+
+Example targeted repair:
+
+```bash
+python -m app.tools.sync_cn_stock_daily_price_from_tushare ^
+  --missing-ohlc-only ^
+  --missing-source tushare_qfq ^
+  --missing-start 2000-01-04 ^
+  --missing-end 2001-06-11 ^
+  --state-file state/tushare_stock_missing_ohlc_state.json
+```
+
+Data-quality guardrails now in place:
+
+1. `app/tasks/db_accessor.py` drops fully empty quote rows before writing stock/index daily tables.
+2. `app/tasks/index_loader_task.py` no longer treats Baostock date-only/price-empty rows as successful index history.
+3. Fully empty historical placeholders previously found in `cn_stock_daily_price` were cleaned from `source='baostock_hist'`.
+
+Audit script:
+
+- `app/tools/audit_empty_quote_rows.py`
+
+Usage:
+
+```bash
+python -m app.tools.audit_empty_quote_rows
+python -m app.tools.audit_empty_quote_rows --fail-on-found
+```
+
 ## Downstream Logic Update (Energy / Signal / Rotation)
 
 Updated objects:
@@ -189,13 +231,19 @@ Updated objects:
 1. `cn_board_industry_eod_agg_v`
 2. `cn_board_concept_eod_agg_v`
 3. `sp_refresh_sector_eod_hist`
+4. `cn_sector_rotation_transition_v`
 
 Current behavior:
 
 1. Board aggregation no longer uses latest snapshot-only `cn_board_*_cons`.
 2. Aggregation uses `cn_board_member_map_d(trade_date, sector_type, sector_id, symbol)`.
 3. `sp_refresh_sector_eod_hist` deletes and rebuilds requested date range from map data, so old stale rows are removed.
-4. Existing `SP_ROTATION_DAILY_REFRESH -> sp_refresh_sector_eod_hist -> ranked/signal` chain now naturally consumes history mapping by date.
+4. `SP_BUILD_SECTOR_ROTATION_RANKED_BY_DATE` and `SP_BUILD_SECTOR_ROTATION_SIGNAL_BY_DATE` read from `cn_sector_rotation_transition_v`.
+5. Existing `SP_ROTATION_DAILY_REFRESH -> sp_refresh_sector_eod_hist -> ranked/signal` chain now naturally consumes history mapping by date.
+
+DDL reminder:
+
+1. Make sure `docs/DDL/cn_market.cn_sector_rotation_transition_v.sql` has been applied in `cn_market` before daily `rotation` runs.
 
 ## Backfill Run (date range)
 

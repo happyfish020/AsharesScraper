@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 from dataclasses import dataclass
 import math
 from typing import List, Optional
@@ -71,12 +71,12 @@ class CoverageAuditTask:
         index_codes: Optional[List[str]] = None,
     ):
         """
-        一次性跑完：
-          - 股票缺失审计
-          - 指数 GAP + health
+        涓€娆℃€ц窇瀹岋細
+          - 鑲＄エ缂哄け瀹¤
+          - 鎸囨暟 GAP + health
         """
         cfg = self.ctx.config
-        base_index = "sh000300"  # 或 "sh000001"
+        base_index = "sh000300"  # 鎴?"sh000001"
     
         max_retries = 8
         for attempt in range(1, max_retries + 1):
@@ -100,12 +100,12 @@ class CoverageAuditTask:
                     raise RuntimeError(
                         f"获取指数 {base_index} 日线数据失败（已重试 {max_retries} 次）：{str(e)}"
                     ) from e
-                self.log.warn("获取失败")
+                self.log.warn("鑾峰彇澶辫触")
         
         if base_index_df.empty:
-            self.log.info("获取基准交易日历失败")
+            self.log.info("鑾峰彇鍩哄噯浜ゆ槗鏃ュ巻澶辫触")
         else:
-            # Step 2: 股票缺失审计
+            # Step 2: 鑲＄エ缂哄け瀹¤
             gap_df, window_start_df = self.audit_index_missing_days(
                  
                 base_index_df=base_index_df,
@@ -130,80 +130,205 @@ class CoverageAuditTask:
                 return stock_missing_df['symbol'].tolist()
                   
         
-            # Step 3: 指数健康审计
+            # Step 3: 鎸囨暟鍋ュ悍瀹¤
             #index_codes = ["sh000001", "sh000300", "sz399001", "sz399006", "sh000688"]
-
-
     def audit_stock_missing_days(
-        self, 
+        self,
         base_index_df: pd.DataFrame,
         start_date: str,
         end_date: str,
         stock_symbols: list | None = None,
     ) -> pd.DataFrame:
         """
-        审计股票在指定区间内的数据缺失情况（WINDOW_START 和 GAP 类型）
-        
-        不内部获取交易日历，直接使用外部传入的基准指数 DataFrame 作为标准
-        
-        Parameters:
-        - engine: SQLAlchemy engine
-        - base_index_df: pd.DataFrame - 基准指数日线数据（必须包含 'date' 列）
-        - start_date: str - 'YYYY-MM-DD'
-        - end_date: str - 'YYYY-MM-DD'
-        - stock_symbols: list[str] | None - 指定股票列表；None 表示数据库中所有股票
-        
-        Returns:
-        - pd.DataFrame: 包含 symbol, missing_type, missing_date, missing_count 等
+        Audit stock missing trading days in the window and classify as WINDOW_START / GAP.
+
+        stock_symbols supports three input shapes:
+        - list[str]
+        - list[tuple[str, first_trade_date]]
+        - DataFrame with symbol + optional first_trade_date columns
         """
         self.log.info(f"开始审计股票缺失数据 [{start_date} ~ {end_date}]，使用外部传入基准交易日历")
-    
-        # Step 1: 从传入的 base_index_df 提取预期交易日集合
+
         try:
-            base_dates = set(pd.to_datetime(base_index_df['date']).dt.date)
+            base_dates = set(pd.to_datetime(base_index_df["date"]).dt.date)
             sorted_base_dates = sorted(base_dates)
             self.log.info(f"基准交易日总数: {len(sorted_base_dates)}")
         except Exception as e:
             self.log.info(f"解析基准交易日历失败: {e}")
             raise
-    
+
         if not base_dates:
             self.log.info("基准交易日为空，无法审计")
-            return pd.DataFrame(columns=['symbol', 'missing_type', 'missing_date', 'missing_count'])
-    
-        # Step 2: 获取待审计股票列表
+            return pd.DataFrame(columns=["symbol", "missing_type", "missing_date", "missing_count"])
+
+        symbol_start_dates: dict[str, object] = {}
+        symbol_last_trade_dates: dict[str, object] = {}
+
         if stock_symbols is None:
             if self._relation_exists("cn_stock_active_universe_v"):
-                symbol_query = "SELECT symbol FROM cn_stock_active_universe_v"
+                symbol_query = """
+                    SELECT symbol, first_trade_date, last_trade_date, recent_trade_days
+                    FROM cn_stock_active_universe_v
+                """
                 self.log.info("使用活跃股票视图 cn_stock_active_universe_v")
             elif self._relation_exists("cn_stock_universe_status_t"):
                 symbol_query = """
-                    SELECT symbol
+                    SELECT symbol, first_trade_date, last_trade_date, recent_trade_days
                     FROM cn_stock_universe_status_t
                     WHERE IFNULL(is_active, 1) = 1
                 """
                 self.log.info("使用活跃股票池 cn_stock_universe_status_t(is_active=1)")
             else:
-                symbol_query = "SELECT DISTINCT symbol FROM cn_stock_daily_price"
-                self.log.info("未检测到状态表，回退到全历史股票池")
+                symbol_query = """
+                    SELECT symbol, MIN(TRADE_DATE) AS first_trade_date
+                    FROM cn_stock_daily_price
+                    GROUP BY symbol
+                """
+                self.log.info("未检测到状态表，回退到历史价格表推断首个交易日")
+
             all_symbols_df = pd.read_sql(symbol_query, self.ctx.engine)
-            stock_symbols = all_symbols_df['symbol'].tolist()
+            sym_col = self._resolve_col(all_symbols_df, "symbol", "SYMBOL")
+            all_symbols_df = all_symbols_df.rename(columns={sym_col: "symbol"})
+
+            ftd_col = None
+            for c in all_symbols_df.columns:
+                if str(c).lower() == "first_trade_date":
+                    ftd_col = c
+                    break
+            if ftd_col is not None:
+                all_symbols_df[ftd_col] = pd.to_datetime(all_symbols_df[ftd_col], errors="coerce").dt.date
+                symbol_start_dates = dict(zip(all_symbols_df["symbol"].astype(str), all_symbols_df[ftd_col]))
+            ltd_col = None
+            for c in all_symbols_df.columns:
+                if str(c).lower() == "last_trade_date":
+                    ltd_col = c
+                    break
+            if ltd_col is not None:
+                all_symbols_df[ltd_col] = pd.to_datetime(all_symbols_df[ltd_col], errors="coerce").dt.date
+                symbol_last_trade_dates = dict(zip(all_symbols_df["symbol"].astype(str), all_symbols_df[ltd_col]))
+
+            # Prefer auditing symbols that are actually "recently tradable" to avoid
+            # counting long-halted or stale active-pool members as daily missing.
+            rtd_col = None
+            for c in all_symbols_df.columns:
+                if str(c).lower() == "recent_trade_days":
+                    rtd_col = c
+                    break
+            if rtd_col is not None:
+                before_n = len(all_symbols_df)
+                rtd = pd.to_numeric(all_symbols_df[rtd_col], errors="coerce").fillna(0)
+                all_symbols_df = all_symbols_df.loc[rtd > 0].copy()
+                self.log.info(
+                    f"按 recent_trade_days>0 过滤股票池: {before_n} -> {len(all_symbols_df)}"
+                )
+                # keep maps aligned with filtered universe
+                kept = set(all_symbols_df["symbol"].astype(str).tolist())
+                symbol_start_dates = {k: v for k, v in symbol_start_dates.items() if k in kept}
+                symbol_last_trade_dates = {k: v for k, v in symbol_last_trade_dates.items() if k in kept}
+
+            stock_symbols = all_symbols_df["symbol"].astype(str).tolist()
             self.log.info(f"自动获取数据库中股票总数: {len(stock_symbols)} 只")
         else:
+            if isinstance(stock_symbols, pd.DataFrame):
+                sym_col = self._resolve_col(stock_symbols, "symbol", "SYMBOL")
+                tmp = stock_symbols.rename(columns={sym_col: "symbol"}).copy()
+
+                ftd_col = None
+                for c in tmp.columns:
+                    if str(c).lower() == "first_trade_date":
+                        ftd_col = c
+                        break
+                if ftd_col is not None:
+                    tmp[ftd_col] = pd.to_datetime(tmp[ftd_col], errors="coerce").dt.date
+                    symbol_start_dates = dict(zip(tmp["symbol"].astype(str), tmp[ftd_col]))
+
+                stock_symbols = tmp["symbol"].astype(str).tolist()
+            elif stock_symbols and isinstance(stock_symbols[0], (tuple, list)):
+                normalized_symbols = []
+                for item in stock_symbols:
+                    if not item:
+                        continue
+                    sym = str(item[0])
+                    normalized_symbols.append(sym)
+                    ftd = item[1] if len(item) > 1 else None
+                    if ftd is not None:
+                        symbol_start_dates[sym] = pd.to_datetime(ftd, errors="coerce").date()
+                stock_symbols = normalized_symbols
+            else:
+                stock_symbols = [str(s) for s in stock_symbols]
+
             self.log.info(f"指定审计股票数: {len(stock_symbols)} 只")
-    
+
         if not stock_symbols:
             self.log.info("无股票可审计")
-            return pd.DataFrame(columns=['symbol', 'missing_type', 'missing_date', 'missing_count'])
-    
-        # Step 3: 分批查询数据库现有记录（解决 ORA-01795）
+            return pd.DataFrame(columns=["symbol", "missing_type", "missing_date", "missing_count"])
+
+        # Fallback for symbols with missing first_trade_date in status tables.
+        missing_start_symbols = [
+            s for s in stock_symbols if (s not in symbol_start_dates) or pd.isna(symbol_start_dates.get(s))
+        ]
+        if missing_start_symbols:
+            infer_batch_size = 900
+            infer_records = []
+            for i in range(0, len(missing_start_symbols), infer_batch_size):
+                batch_symbols = missing_start_symbols[i : i + infer_batch_size]
+                symbols_str = "','".join(batch_symbols)
+                infer_query = f"""
+                    SELECT symbol, MIN(TRADE_DATE) AS first_trade_date
+                    FROM cn_stock_daily_price
+                    WHERE symbol IN ('{symbols_str}')
+                    GROUP BY symbol
+                """
+                infer_df = pd.read_sql(infer_query, self.ctx.engine)
+                if infer_df is not None and not infer_df.empty:
+                    sym_col = self._resolve_col(infer_df, "symbol", "SYMBOL")
+                    ftd_col = self._resolve_col(infer_df, "first_trade_date", "FIRST_TRADE_DATE")
+                    infer_df = infer_df.rename(columns={sym_col: "symbol", ftd_col: "first_trade_date"})
+                    infer_df["first_trade_date"] = pd.to_datetime(infer_df["first_trade_date"], errors="coerce").dt.date
+                    infer_records.append(infer_df[["symbol", "first_trade_date"]])
+            if infer_records:
+                infer_all = pd.concat(infer_records, ignore_index=True).drop_duplicates(subset=["symbol"])
+                inferred_map = dict(zip(infer_all["symbol"].astype(str), infer_all["first_trade_date"]))
+                symbol_start_dates.update(inferred_map)
+                self.log.info(
+                    f"已为 {len(inferred_map)} 只股票从历史价格表回填 first_trade_date（原状态表为空）"
+                )
+
+        # If first_trade_date is still unknown and the symbol has never appeared in history,
+        # skip it from strict missing audit to avoid systematic false positives.
+        unknown_start_symbols = [
+            s for s in stock_symbols if (s not in symbol_start_dates) or pd.isna(symbol_start_dates.get(s))
+        ]
+        never_seen_symbols: set[str] = set()
+        if unknown_start_symbols:
+            seen_batch_size = 900
+            seen_symbols: set[str] = set()
+            for i in range(0, len(unknown_start_symbols), seen_batch_size):
+                batch_symbols = unknown_start_symbols[i : i + seen_batch_size]
+                symbols_str = "','".join(batch_symbols)
+                seen_query = f"""
+                    SELECT DISTINCT symbol
+                    FROM cn_stock_daily_price
+                    WHERE symbol IN ('{symbols_str}')
+                      AND TRADE_DATE <= '{end_date}'
+                """
+                seen_df = pd.read_sql(seen_query, self.ctx.engine)
+                if seen_df is not None and not seen_df.empty:
+                    sym_col = self._resolve_col(seen_df, "symbol", "SYMBOL")
+                    seen_symbols.update(seen_df[sym_col].astype(str).tolist())
+            never_seen_symbols = set(unknown_start_symbols) - seen_symbols
+            if never_seen_symbols:
+                self.log.info(
+                    f"跳过 {len(never_seen_symbols)} 只从未入库且首日未知的股票，避免 WINDOW_START 误报"
+                )
+
         batch_size = 900
         batches = math.ceil(len(stock_symbols) / batch_size)
         self.log.info(f"分 {batches} 批查询数据库现有交易日记录")
-    
+
         existing_records = []
         for i in range(0, len(stock_symbols), batch_size):
-            batch_symbols = stock_symbols[i:i + batch_size]
+            batch_symbols = stock_symbols[i : i + batch_size]
             symbols_str = "','".join(batch_symbols)
             query = f"""
                 SELECT symbol, TRADE_DATE
@@ -217,126 +342,137 @@ class CoverageAuditTask:
                     td_col = self._resolve_col(batch_df, "trade_date", "TRADE_DATE")
                     sym_col = self._resolve_col(batch_df, "symbol", "SYMBOL")
                     batch_df = batch_df.rename(columns={td_col: "trade_date", sym_col: "symbol"})
-                    batch_df['trade_date'] = pd.to_datetime(batch_df['trade_date']).dt.date
+                    batch_df["trade_date"] = pd.to_datetime(batch_df["trade_date"]).dt.date
                     existing_records.append(batch_df)
-                self.log.info(f"批次 {i//batch_size + 1}/{batches} 查询完成，记录数: {len(batch_df)}")
+                self.log.info(f"批次 {i // batch_size + 1}/{batches} 查询完成，记录数: {len(batch_df)}")
             except Exception as e:
                 self.log.info(f"批次查询失败: {e}")
                 raise
-    
-        # 合并所有批次
-        existing_df = pd.concat(existing_records, ignore_index=True) if existing_records else pd.DataFrame(columns=['symbol', 'trade_date'])
-    
-        # Step 4: 计算每只股票的缺失
+
+        existing_df = (
+            pd.concat(existing_records, ignore_index=True)
+            if existing_records
+            else pd.DataFrame(columns=["symbol", "trade_date"])
+        )
+
         missing_records = []
-    
+        start_dt = pd.to_datetime(start_date, errors="coerce").date()
+        self.log.info("股票缺失审计口径版本: v3(last_trade_date_guard)")
+        skipped_by_last_trade = 0
+
         for symbol in stock_symbols:
-            stock_dates = set(existing_df[existing_df['symbol'] == symbol]['trade_date'])
-            missing_dates = base_dates - stock_dates
-    
+            if symbol in never_seen_symbols:
+                continue
+            last_trade_date = symbol_last_trade_dates.get(symbol)
+            if last_trade_date is not None and not pd.isna(last_trade_date) and last_trade_date < start_dt:
+                skipped_by_last_trade += 1
+                continue
+            stock_dates = set(existing_df[existing_df["symbol"] == symbol]["trade_date"])
+
+            first_trade_date = symbol_start_dates.get(symbol)
+            if first_trade_date is not None and not pd.isna(first_trade_date):
+                effective_start = max(start_dt, first_trade_date)
+                symbol_base_dates = [d for d in sorted_base_dates if d >= effective_start]
+            else:
+                symbol_base_dates = sorted_base_dates
+
+            if not symbol_base_dates:
+                continue
+
+            symbol_base_dates_set = set(symbol_base_dates)
+            missing_dates = symbol_base_dates_set - stock_dates
             if not missing_dates:
                 continue
-    
+
             sorted_missing = sorted(missing_dates)
-    
-            # WINDOW_START 判断
-            window_start_date = sorted_base_dates[0]
+            window_start_date = symbol_base_dates[0]
+
             continuous_from_start = []
-            for d in sorted_base_dates:
+            for d in symbol_base_dates:
                 if d in missing_dates:
                     continuous_from_start.append(d)
                 else:
                     break
-    
+
             if continuous_from_start and continuous_from_start[0] == window_start_date:
-                missing_records.append({
-                    'symbol': symbol,
-                    'missing_type': 'WINDOW_START',
-                    'missing_date': window_start_date.strftime('%Y-%m-%d'),
-                    'missing_count': len(continuous_from_start)
-                })
-    
-            # GAP 类型
+                missing_records.append(
+                    {
+                        "symbol": symbol,
+                        "missing_type": "WINDOW_START",
+                        "missing_date": window_start_date.strftime("%Y-%m-%d"),
+                        "missing_count": len(continuous_from_start),
+                    }
+                )
+
             gap_dates = [d for d in sorted_missing if d not in continuous_from_start]
             for gap_date in gap_dates:
-                missing_records.append({
-                    'symbol': symbol,
-                    'missing_type': 'GAP',
-                    'missing_date': gap_date.strftime('%Y-%m-%d'),
-                    'missing_count': 1
-                })
-    
-        # Step 5: 输出结果
+                missing_records.append(
+                    {
+                        "symbol": symbol,
+                        "missing_type": "GAP",
+                        "missing_date": gap_date.strftime("%Y-%m-%d"),
+                        "missing_count": 1,
+                    }
+                )
+
         result_df = pd.DataFrame(missing_records)
         if not result_df.empty:
-            result_df = result_df.sort_values(['missing_type', 'symbol', 'missing_date'])
-            window_count = len(result_df[result_df['missing_type'] == 'WINDOW_START'])
-            gap_count = len(result_df[result_df['missing_type'] == 'GAP'])
-            self.log.info(f"股票审计完成，发现缺失 {len(result_df)} 条（WINDOW_START: {window_count}，GAP: {gap_count}）")
+            result_df = result_df.sort_values(["missing_type", "symbol", "missing_date"])
+            window_count = len(result_df[result_df["missing_type"] == "WINDOW_START"])
+            gap_count = len(result_df[result_df["missing_type"] == "GAP"])
+            self.log.info(
+                f"股票审计完成，发现缺失 {len(result_df)} 条（WINDOW_START: {window_count}，GAP: {gap_count}）"
+            )
+            self.log.info(
+                f"审计附加统计: skipped_by_last_trade={skipped_by_last_trade}, "
+                f"missing_sample={','.join(result_df['symbol'].astype(str).head(20).tolist())}"
+            )
         else:
             self.log.info("股票审计完成，未发现缺失数据")
-    
+
         return result_df
-    # =====================================================
-    # 核心函数 2：指数 GAP 交叉审计 + Health
-    # =====================================================
-     
-    
-
-
-
-    def audit_index_missing_days(self,
-        
+    def audit_index_missing_days(
+        self,
         base_index_df: pd.DataFrame,
         index_codes: list,
         start_date: str,
         end_date: str,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         """
-        审计多个指数在指定区间的日历健康情况（相对于实时基准交易日历）
-        
-        参照 audit_stock_missing_days 风格：从数据库读取已有数据，分批查询
-        
-        Parameters:
-        - base_index_df: pd.DataFrame - 实时获取的基准指数日线（包含 'date' 列）
-        - index_codes: list[str] - 要审计的指数代码列表
-        - start_date: str - 'YYYY-MM-DD'
-        - end_date: str - 'YYYY-MM-DD'
-        
+        Audit index missing trading days in the window and classify as WINDOW_START / GAP.
+
         Returns:
-        - gap_df: pd.DataFrame - GAP 类型缺失
-        - window_start_df: pd.DataFrame - WINDOW_START 类型缺失
+        - gap_df: GAP rows
+        - window_start_df: WINDOW_START rows
         """
         self.log.info(f"开始审计指数日历健康 [{start_date} ~ {end_date}]，审计指数数: {len(index_codes)}")
-    
-        # Step 1: 从传入的 base_index_df 提取标准交易日
+
         try:
-            base_dates = set(pd.to_datetime(base_index_df['date']).dt.date)
+            base_dates = set(pd.to_datetime(base_index_df["date"]).dt.date)
             sorted_base_dates = sorted(base_dates)
             self.log.info(f"基准交易日总数: {len(sorted_base_dates)}")
         except Exception as e:
             self.log.info(f"解析基准交易日历失败: {e}")
             raise
-    
+
         if not base_dates:
             self.log.info("基准交易日为空，无法审计指数")
-            empty_df = pd.DataFrame(columns=['index_code', 'missing_type', 'missing_date', 'missing_count'])
+            empty_df = pd.DataFrame(columns=["index_code", "missing_type", "missing_date", "missing_count"])
             return empty_df.copy(), empty_df.copy()
-    
+
         if not index_codes:
             self.log.info("无指数可审计")
-            empty_df = pd.DataFrame(columns=['index_code', 'missing_type', 'missing_date', 'missing_count'])
+            empty_df = pd.DataFrame(columns=["index_code", "missing_type", "missing_date", "missing_count"])
             return empty_df.copy(), empty_df.copy()
-    
-        # Step 2: 分批从数据库查询指数已有交易日（解决 ORA-01795）
+
         batch_size = 900
         batches = math.ceil(len(index_codes) / batch_size)
         self.log.info(f"分 {batches} 批查询数据库中指数现有记录")
-    
+
         existing_records = []
         for i in range(0, len(index_codes), batch_size):
-            batch_codes = index_codes[i:i + batch_size]
-            codes_str = "','" .join(batch_codes)
+            batch_codes = index_codes[i : i + batch_size]
+            codes_str = "','".join(batch_codes)
             query = f"""
                 SELECT index_code, TRADE_DATE
                 FROM cn_index_daily_price
@@ -349,69 +485,69 @@ class CoverageAuditTask:
                     td_col = self._resolve_col(batch_df, "trade_date", "TRADE_DATE")
                     idx_col = self._resolve_col(batch_df, "index_code", "INDEX_CODE")
                     batch_df = batch_df.rename(columns={td_col: "trade_date", idx_col: "index_code"})
-                    batch_df['trade_date'] = pd.to_datetime(batch_df['trade_date']).dt.date
+                    batch_df["trade_date"] = pd.to_datetime(batch_df["trade_date"]).dt.date
                     existing_records.append(batch_df)
-                self.log.info(f"指数批次 {i//batch_size + 1}/{batches} 查询完成，记录数: {len(batch_df)}")
+                self.log.info(f"指数批次 {i // batch_size + 1}/{batches} 查询完成，记录数: {len(batch_df)}")
             except Exception as e:
                 self.log.info(f"指数批次查询失败: {e}")
                 raise
-    
-        # 合并结果
-        existing_df = pd.concat(existing_records, ignore_index=True) if existing_records else pd.DataFrame(columns=['index_code', 'trade_date'])
-    
-        # Step 3: 计算每个指数的缺失
+
+        existing_df = (
+            pd.concat(existing_records, ignore_index=True)
+            if existing_records
+            else pd.DataFrame(columns=["index_code", "trade_date"])
+        )
+
         gap_records = []
         window_start_records = []
-    
-        window_start_date = sorted_base_dates[0]  # 区间起始日
-    
+
+        window_start_date = sorted_base_dates[0]
         for index_code in index_codes:
-            index_dates = set(existing_df[existing_df['index_code'] == index_code]['trade_date'])
+            index_dates = set(existing_df[existing_df["index_code"] == index_code]["trade_date"])
             missing_dates = base_dates - index_dates
-    
             if not missing_dates:
-                continue  # 该指数完整，无缺失
-    
+                continue
+
             sorted_missing = sorted(missing_dates)
-    
-            # WINDOW_START 判断：从起始日期连续缺失
+
             continuous_from_start = []
             for d in sorted_base_dates:
                 if d in missing_dates:
                     continuous_from_start.append(d)
                 else:
                     break
-    
+
             if continuous_from_start and continuous_from_start[0] == window_start_date:
-                window_start_records.append({
-                    'index_code': index_code,
-                    'missing_type': 'WINDOW_START',
-                    'missing_date': window_start_date.strftime('%Y-%m-%d'),
-                    'missing_count': len(continuous_from_start)
-                })
-    
-            # GAP 类型：非起始部分的缺失
+                window_start_records.append(
+                    {
+                        "index_code": index_code,
+                        "missing_type": "WINDOW_START",
+                        "missing_date": window_start_date.strftime("%Y-%m-%d"),
+                        "missing_count": len(continuous_from_start),
+                    }
+                )
+
             gap_dates = [d for d in sorted_missing if d not in continuous_from_start]
             for gap_date in gap_dates:
-                gap_records.append({
-                    'index_code': index_code,
-                    'missing_type': 'GAP',
-                    'missing_date': gap_date.strftime('%Y-%m-%d'),
-                    'missing_count': 1
-                })
-    
-        # Step 4: 转为 DataFrame 并排序
+                gap_records.append(
+                    {
+                        "index_code": index_code,
+                        "missing_type": "GAP",
+                        "missing_date": gap_date.strftime("%Y-%m-%d"),
+                        "missing_count": 1,
+                    }
+                )
+
         gap_df = pd.DataFrame(gap_records)
         window_start_df = pd.DataFrame(window_start_records)
-    
+
         if not gap_df.empty:
-            gap_df = gap_df.sort_values(['index_code', 'missing_date'])
+            gap_df = gap_df.sort_values(["index_code", "missing_date"])
         if not window_start_df.empty:
-            window_start_df = window_start_df.sort_values(['index_code'])
-    
+            window_start_df = window_start_df.sort_values(["index_code"])
+
         total_gaps = len(gap_df)
         total_windows = len(window_start_df)
         self.log.info(f"指数日历审计完成，GAP 缺失 {total_gaps} 条，WINDOW_START 缺失 {total_windows} 条")
-    
-        return gap_df, window_start_df 
- 
+
+        return gap_df, window_start_df

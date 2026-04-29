@@ -136,6 +136,26 @@ ORDER BY action;
   - `cn_sector_rotation_ranked_t` (daily ranked state)
   - `cn_sector_rotation_signal_t` (daily signal)
 
+### Runtime prerequisite (must exist before daily run)
+- Required L2 view:
+  - `cn_sector_rotation_transition_v`
+- Direct dependency chain:
+  - `SP_ROTATION_DAILY_REFRESH`
+  - `-> SP_BUILD_SECTOR_ROTATION_RANKED_BY_DATE`
+  - `-> SP_BUILD_SECTOR_ROTATION_SIGNAL_BY_DATE`
+  - `-> cn_sector_rotation_transition_v`
+- If missing, MySQL throws:
+  - `1146: Table 'cn_market.cn_sector_rotation_transition_v' doesn't exist`
+- DDL file:
+  - `docs/DDL/cn_market.cn_sector_rotation_transition_v.sql`
+
+### Recommended DDL apply order (rotation core)
+1. `docs/DDL/cn_market.sp_refresh_sector_eod_hist.sql`
+2. `docs/DDL/cn_market.cn_sector_rotation_transition_v.sql`
+3. `docs/DDL/cn_market.sp_build_sector_rotation_ranked_by_date.sql`
+4. `docs/DDL/cn_market.sp_build_sector_rotation_signal_by_date.sql`
+5. `docs/DDL/cn_market.sp_rotation_daily_refresh.sql`
+
 ### Daily operation policy
 - Keep one fixed production `run_id` (do not change per day).
 - Run order per day:
@@ -151,6 +171,19 @@ ORDER BY action;
 python runner.py --tasks stock,rotation --asof latest
 ```
 
+### Stock/Index data-quality guard
+
+Run this after daily loaders to ensure no fully empty quote rows were written into stock/index price tables:
+
+```bash
+python -m app.tools.audit_empty_quote_rows --fail-on-found
+```
+
+What it checks:
+- `cn_stock_daily_price`
+- `cn_index_daily_price`
+- row is considered bad when `open/high/low/close/pre_close/volume/amount/chg_pct` are all `NULL`
+
 ### Optional env overrides
 - `ROTATION_SNAPSHOT_SQL`: override SP call SQL
 - `ROTATION_ENERGY_SQL`: deprecated legacy pre-step; default is disabled
@@ -161,19 +194,25 @@ python runner.py --tasks stock,rotation --asof latest
 -- 1) Today from price
 SELECT MAX(trade_date) AS dt FROM cn_stock_daily_price;
 
--- 2) Signal distribution
+-- 2) Empty-quote audit should be zero
+SELECT COUNT(*) AS n
+FROM cn_stock_daily_price
+WHERE open IS NULL AND high IS NULL AND low IS NULL AND close IS NULL
+  AND pre_close IS NULL AND volume IS NULL AND amount IS NULL AND chg_pct IS NULL;
+
+-- 3) Signal distribution
 SELECT action, COUNT(*) AS n
 FROM cn_sector_rotation_signal_t
 WHERE signal_date = :DT
 GROUP BY action
 ORDER BY action;
 
--- 3) BT daily row exists
+-- 4) BT daily row exists
 SELECT COUNT(*) AS n
 FROM cn_sector_rot_bt_daily_t
 WHERE run_id = :RUN_ID AND trade_date = :DT;
 
--- 4) Snapshot rows exist
+-- 5) Snapshot rows exist
 SELECT 'ENTRY' AS snap, COUNT(*) AS n
 FROM cn_rotation_entry_snap_t
 WHERE run_id = :RUN_ID AND trade_date = :DT

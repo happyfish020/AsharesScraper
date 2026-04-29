@@ -5,6 +5,7 @@ import configparser
 import json
 import os
 import time
+import warnings
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -30,6 +31,13 @@ def patch_pandas_fillna_method_compat() -> None:
     global _PANDAS_FILLNA_PATCHED
     if _PANDAS_FILLNA_PATCHED:
         return
+
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*fillna with 'method' is deprecated.*",
+        category=FutureWarning,
+        module=r"tushare\..*",
+    )
 
     ndframe_cls = getattr(pd.core.generic, "NDFrame", None)
     if ndframe_cls is None:
@@ -64,6 +72,13 @@ def _parse_month(s: str) -> date:
     if len(v) != 7 or v[4] != "-":
         raise ValueError(f"Invalid month format: {s!r}, expected YYYY-MM")
     return datetime.strptime(v, "%Y-%m").date().replace(day=1)
+
+
+def _parse_ymd(s: str) -> date:
+    v = (s or "").strip()
+    if len(v) == 10 and v[4] == "-" and v[7] == "-":
+        return datetime.strptime(v, "%Y-%m-%d").date()
+    return datetime.strptime(v, "%Y%m%d").date()
 
 
 def _month_end(d: date) -> date:
@@ -233,6 +248,34 @@ def resolve_tushare_token(cli_token: str, config_path: str) -> tuple[str, List[P
     return "", tried
 
 
+def ensure_cn_stock_daily_ohlc_columns(engine) -> None:
+    required_columns = {
+        "OPEN": "ALTER TABLE cn_stock_daily_price ADD COLUMN `OPEN` DOUBLE DEFAULT NULL AFTER `TRADE_DATE`",
+        "CLOSE": "ALTER TABLE cn_stock_daily_price ADD COLUMN `CLOSE` DOUBLE DEFAULT NULL AFTER `OPEN`",
+        "PRE_CLOSE": "ALTER TABLE cn_stock_daily_price ADD COLUMN `PRE_CLOSE` DOUBLE DEFAULT NULL AFTER `CLOSE`",
+        "HIGH": "ALTER TABLE cn_stock_daily_price ADD COLUMN `HIGH` DOUBLE DEFAULT NULL AFTER `PRE_CLOSE`",
+        "LOW": "ALTER TABLE cn_stock_daily_price ADD COLUMN `LOW` DOUBLE DEFAULT NULL AFTER `HIGH`",
+    }
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT COLUMN_NAME
+                FROM information_schema.columns
+                WHERE table_schema = DATABASE()
+                  AND table_name = 'cn_stock_daily_price'
+                """
+            )
+        ).fetchall()
+        existing = {str(row[0]).upper() for row in rows}
+        missing = [name for name in required_columns if name not in existing]
+        for name in missing:
+            conn.execute(text(required_columns[name]))
+            print(f"[schema] added cn_stock_daily_price.{name}")
+        if not missing:
+            print("[schema] cn_stock_daily_price already has OHLC columns")
+
+
 @dataclass
 class TushareStockDailySync:
     token: str
@@ -249,6 +292,7 @@ class TushareStockDailySync:
         self._tls = local()
         self._api_sem = Semaphore(max(1, int(self.api_concurrency)))
         self.engine = build_engine()
+        ensure_cn_stock_daily_ohlc_columns(self.engine)
         self._upsert_cols = [
             "symbol",
             "trade_date",
@@ -294,6 +338,51 @@ class TushareStockDailySync:
         out = pd.concat(frames, ignore_index=True)
         out = out.drop_duplicates(subset=["ts_code"]).sort_values("ts_code").reset_index(drop=True)
         return out
+
+    def build_missing_ohlc_workload(
+        self,
+        universe: pd.DataFrame,
+        source_filter: str = "tushare_qfq",
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> pd.DataFrame:
+        if universe is None or universe.empty:
+            return pd.DataFrame(columns=["symbol", "ts_code", "name", "exchange", "gap_start", "gap_end", "missing_rows"])
+
+        symbols = universe[["symbol", "ts_code", "name", "exchange"]].copy()
+        sql = """
+            SELECT
+                p.symbol,
+                MIN(p.trade_date) AS gap_start,
+                MAX(p.trade_date) AS gap_end,
+                COUNT(*) AS missing_rows
+            FROM cn_stock_daily_price p
+            WHERE (p.`open` IS NULL OR p.`high` IS NULL OR p.`low` IS NULL OR p.`close` IS NULL)
+        """
+        params: Dict[str, object] = {}
+        if source_filter:
+            sql += " AND p.source = :source_filter"
+            params["source_filter"] = source_filter
+        if start_date is not None:
+            sql += " AND p.trade_date >= :start_date"
+            params["start_date"] = start_date
+        if end_date is not None:
+            sql += " AND p.trade_date <= :end_date"
+            params["end_date"] = end_date
+        sql += " GROUP BY p.symbol"
+
+        with self.engine.connect() as conn:
+            gaps = pd.read_sql(text(sql), conn, params=params)
+        if gaps.empty:
+            return pd.DataFrame(columns=["symbol", "ts_code", "name", "exchange", "gap_start", "gap_end", "missing_rows"])
+
+        gaps["gap_start"] = pd.to_datetime(gaps["gap_start"], errors="coerce").dt.date
+        gaps["gap_end"] = pd.to_datetime(gaps["gap_end"], errors="coerce").dt.date
+        gaps["missing_rows"] = pd.to_numeric(gaps["missing_rows"], errors="coerce").fillna(0).astype(int)
+        work = symbols.merge(gaps, on="symbol", how="inner")
+        if work.empty:
+            return pd.DataFrame(columns=["symbol", "ts_code", "name", "exchange", "gap_start", "gap_end", "missing_rows"])
+        return work.sort_values(["gap_start", "symbol"]).reset_index(drop=True)
 
     def fetch_qfq_daily(self, ts_code: str, start: date, end: date) -> pd.DataFrame:
         last_err: Exception | None = None
@@ -608,6 +697,95 @@ class TushareStockDailySync:
             "csv_dir": str(csv_dir),
         }
 
+    def sync_missing_ohlc(
+        self,
+        universe: pd.DataFrame,
+        state_file: Path,
+        source_filter: str = "tushare_qfq",
+        start_date: date | None = None,
+        end_date: date | None = None,
+        symbol_limit: int = 0,
+        batch_size: int = 30,
+    ) -> Dict[str, int]:
+        work = self.build_missing_ohlc_workload(
+            universe=universe,
+            source_filter=source_filter,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if symbol_limit > 0:
+            work = work.head(symbol_limit).copy()
+
+        state = self._load_state(state_file)
+        completed_symbols = set(str(x) for x in state.get("completed_symbols", []))
+        failed_symbols = dict(state.get("failed_symbols", {}))
+
+        total = len(work)
+        done_this_run = 0
+        fetched_rows = 0
+        db_rowcount = 0
+        processed_since_flush = 0
+
+        for i, rec in enumerate(work.itertuples(index=False), start=1):
+            symbol = str(rec.symbol)
+            ts_code = str(rec.ts_code)
+            name = str(rec.name) if rec.name is not None else None
+            gap_start = rec.gap_start
+            gap_end = rec.gap_end
+            if symbol in completed_symbols:
+                if i % 200 == 0 or i == total:
+                    print(f"[missing-ohlc resume] progress {i}/{total} skip_completed={len(completed_symbols)}")
+                continue
+            try:
+                raw = self.fetch_qfq_daily(ts_code=ts_code, start=gap_start, end=gap_end)
+                if raw.empty:
+                    df = pd.DataFrame(columns=self._upsert_cols)
+                else:
+                    raw["source"] = self.source_label
+                    raw["window_start"] = gap_start
+                    raw["name"] = name
+                    for c in self._upsert_cols:
+                        if c not in raw.columns:
+                            raw[c] = None
+                    df = raw[self._upsert_cols].copy()
+                affected = self._upsert_dataframe(df)
+                completed_symbols.add(symbol)
+                failed_symbols.pop(symbol, None)
+                done_this_run += 1
+                fetched_rows += int(len(df))
+                db_rowcount += int(affected)
+                processed_since_flush += 1
+                print(
+                    f"[missing-ohlc {i}/{total}] {symbol} gap={gap_start}..{gap_end} "
+                    f"missing_rows={int(rec.missing_rows)} fetched={len(df)} db_rowcount={affected}"
+                )
+            except Exception as e:
+                failed_symbols[symbol] = str(e)
+                processed_since_flush += 1
+                print(f"[missing-ohlc {i}/{total}] {symbol} failed err={e}")
+
+            if self.sleep_ms > 0:
+                time.sleep(self.sleep_ms / 1000.0)
+
+            if processed_since_flush >= max(1, int(batch_size)):
+                self._save_state(state_file, completed_symbols, failed_symbols)
+                print(
+                    f"[missing-ohlc checkpoint] batch={processed_since_flush} completed={len(completed_symbols)} "
+                    f"failed={len(failed_symbols)} state={state_file}"
+                )
+                processed_since_flush = 0
+
+        self._save_state(state_file, completed_symbols, failed_symbols)
+        return {
+            "total_symbols": total,
+            "done_this_run": done_this_run,
+            "fetched_rows": fetched_rows,
+            "db_rowcount": db_rowcount,
+            "completed_total": len(completed_symbols),
+            "failed_total": len(failed_symbols),
+            "state_file": str(state_file),
+        }
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -627,6 +805,10 @@ def main() -> None:
     parser.add_argument("--fetch-retries", type=int, default=5, help="Retry times for per-symbol tushare fetch")
     parser.add_argument("--batch-size", type=int, default=30, help="Checkpoint flush interval by symbols")
     parser.add_argument("--state-file", default="state/tushare_stock_qfq_state.json", help="Resume state JSON file")
+    parser.add_argument("--missing-ohlc-only", action="store_true", help="Only refill rows already in cn_stock_daily_price where OHLC is NULL")
+    parser.add_argument("--missing-source", default="tushare_qfq", help="Source filter when using --missing-ohlc-only")
+    parser.add_argument("--missing-start", default="", help="Optional lower bound date YYYYMMDD or YYYY-MM-DD for --missing-ohlc-only")
+    parser.add_argument("--missing-end", default="", help="Optional upper bound date YYYYMMDD or YYYY-MM-DD for --missing-ohlc-only")
     parser.set_defaults(reuse_csv=True)
     args = parser.parse_args()
 
@@ -654,6 +836,29 @@ def main() -> None:
     if universe.empty:
         raise SystemExit("No A-share symbols from Tushare stock_basic.")
     print(f"universe_size={len(universe)} month_range={start_month.strftime('%Y-%m')}..{end_month.strftime('%Y-%m')}")
+
+    if args.missing_ohlc_only:
+        missing_start = _parse_ymd(args.missing_start) if str(args.missing_start).strip() else None
+        missing_end = _parse_ymd(args.missing_end) if str(args.missing_end).strip() else None
+        if missing_start is not None and missing_end is not None and missing_start > missing_end:
+            raise SystemExit(f"Invalid missing OHLC date range: {missing_start} > {missing_end}")
+        state_file = Path(args.state_file)
+        stats = syncer.sync_missing_ohlc(
+            universe=universe,
+            state_file=state_file,
+            source_filter=(args.missing_source or "").strip(),
+            start_date=missing_start,
+            end_date=missing_end,
+            symbol_limit=max(0, int(args.symbol_limit)),
+            batch_size=max(1, int(args.batch_size)),
+        )
+        print(
+            f"missing_ohlc_done total_symbols={stats['total_symbols']} done_this_run={stats['done_this_run']} "
+            f"fetched_rows={stats['fetched_rows']} db_rowcount={stats['db_rowcount']} "
+            f"completed_total={stats['completed_total']} failed_total={stats['failed_total']} "
+            f"state_file={stats['state_file']}"
+        )
+        return
 
     reuse_csv = bool(args.reuse_csv)
     csv_dir = Path(args.csv_dir)

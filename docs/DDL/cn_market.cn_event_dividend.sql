@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS cn_event_dividend (
+    symbol          VARCHAR(10)    NOT NULL,
+    ann_date        DATE           NOT NULL,
+    end_date        DATE           NOT NULL,
+    record_date     DATE,
+    ex_date         DATE,
+    pay_date        DATE,
+    stk_div         DECIMAL(18,6),
+    cash_div        DECIMAL(18,6),
+    div_proc        VARCHAR(200),
+    source          VARCHAR(30),
+    raw_payload     JSON,
+    updated_at      DATETIME       DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, ann_date, end_date, div_proc),
+    KEY idx_div_symbol (symbol),
+    KEY idx_div_ann_date (ann_date),
+    KEY idx_div_end_date (end_date),
+    KEY idx_div_record_date (record_date),
+    KEY idx_div_ex_date (ex_date)
+);

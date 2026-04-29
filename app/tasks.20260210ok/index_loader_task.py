@@ -8,12 +8,10 @@ from typing import List, Set
 from datetime import date
 
 import pandas as pd
-import baostock as bs
 
-#from price_loader import load_index_price_em
 from app.tasks.db_accessor import DbAccessor
 from app.tasks.state_store import StateStore
-from app.utils.wireguard_helper import activate_tunnel, switch_wire_guard
+from app.utils.wireguard_helper import activate_tunnel
 import akshare as ak 
 
 @dataclass
@@ -35,11 +33,6 @@ class IndexLoaderTask:
 
         self.log.info(f"[START][INDEX] window={cfg.start_date}~{cfg.end_date} | indices={len(indices)}")
         activate_tunnel("cn")
-        lg = bs.login()
-        if lg.error_code != '0':
-            self.log.error(f"baostock login failed: {lg.error_msg}")
-        else:
-            self.log.info("baostock login success (global for index batch)")
 
         scanned = state.load_scanned()
         failed = state.load_failed()
@@ -86,67 +79,13 @@ class IndexLoaderTask:
 
             time.sleep(random.uniform(0.3, 0.8))
 
-        try:
-            bs.logout()
-        except Exception:
-            pass
-        self.log.info("baostock logout (index)")
-
         state.save_scanned(scanned)
         state.save_failed(failed)
         self.log.info("[DONE][INDEX] loader finished")
 
     # ------------------------
     def _load_index_price_with_failover(self,   index_code: str, start_date: str, end_date: str) -> pd.DataFrame | None:
-        df = self._load_index_price_baostock_internal( index_code, start_date, end_date)
-        if df is not None and not df.empty:
-            return df
-        self.log.warning(f"baostock failed for index {index_code}, switching to eastmoney")
         return self.load_index_price_em(index_code=index_code, start_date=start_date, end_date=end_date)
-
-    def _load_index_price_baostock_internal(self,   index_code: str, start_date: str, end_date: str) -> pd.DataFrame | None:
-        code_clean = str(index_code).strip().lower()
-        # accept sh000300/sz399001 OR 000300/399001
-        if code_clean.startswith("sh") or code_clean.startswith("sz"):
-            code6 = code_clean[2:]
-            prefix = code_clean[:2]
-        else:
-            code6 = code_clean
-            # crude heuristic
-            prefix = "sz" if code6.startswith(("0","3")) else "sh"
-        symbol = f"{prefix}.{code6}"
-
-        fields = "date,open,high,low,close,preclose,volume,amount,pctChg"
-        rs = bs.query_history_k_data_plus(
-            symbol,
-            fields=fields,
-            start_date=pd.to_datetime(start_date).strftime("%Y-%m-%d"),
-            end_date=pd.to_datetime(end_date).strftime("%Y-%m-%d"),
-            frequency="d",
-            adjustflag="1",
-        )
-        if rs.error_code != '0':
-            self.log.warning(f"baostock query failed {symbol}: {rs.error_msg}")
-            return None
-
-        data = []
-        while rs.next():
-            data.append(rs.get_row_data())
-        if not data:
-            return None
-
-        df = pd.DataFrame(data, columns=fields.split(","))
-        df["trade_date"] = pd.to_datetime(df["date"])
-        df.rename(columns={
-            "preclose": "pre_close",
-            "pctChg": "chg_pct",
-        }, inplace=True)
-        for col in ["open","high","low","close","pre_close","volume","amount","chg_pct"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-        df["source"] = "baostock"
-        keep = ["trade_date","open","close","high","low","volume","amount","source","pre_close","chg_pct"]
-        return df[keep]
 
     def _log_progress(self,  stage: str, cur: int, total: int, symbol: str, msg: str) -> None:
         pct = (cur / total) * 100 if total else 0

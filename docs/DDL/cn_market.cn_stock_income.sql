@@ -1,0 +1,37 @@
+-- cn_market.cn_stock_income
+-- Historical quarterly income statement snapshots from Tushare income API.
+
+CREATE TABLE IF NOT EXISTS `cn_stock_income` (
+    `symbol` varchar(10) NOT NULL,
+    `end_date` date NOT NULL,
+    `ann_date` date DEFAULT NULL,
+    `f_ann_date` date DEFAULT NULL,
+    `report_type` varchar(32) DEFAULT NULL,
+    `comp_type` varchar(8) DEFAULT NULL,
+    `end_type` varchar(32) DEFAULT NULL,
+    `basic_eps` decimal(18,6) DEFAULT NULL,
+    `diluted_eps` decimal(18,6) DEFAULT NULL,
+    `total_revenue` decimal(24,4) DEFAULT NULL,
+    `revenue` decimal(24,4) DEFAULT NULL,
+    `operate_profit` decimal(24,4) DEFAULT NULL,
+    `total_profit` decimal(24,4) DEFAULT NULL,
+    `income_tax` decimal(24,4) DEFAULT NULL,
+    `n_income` decimal(24,4) DEFAULT NULL,
+    `n_income_attr_p` decimal(24,4) DEFAULT NULL,
+    `minority_gain` decimal(24,4) DEFAULT NULL,
+    `oth_compr_income` decimal(24,4) DEFAULT NULL,
+    `t_compr_income` decimal(24,4) DEFAULT NULL,
+    `compr_inc_attr_p` decimal(24,4) DEFAULT NULL,
+    `compr_inc_attr_m_s` decimal(24,4) DEFAULT NULL,
+    `ebit` decimal(24,4) DEFAULT NULL,
+    `ebitda` decimal(24,4) DEFAULT NULL,
+    `undist_profit` decimal(24,4) DEFAULT NULL,
+    `source` varchar(64) DEFAULT NULL,
+    `raw_payload` longtext DEFAULT NULL,
+    `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`symbol`, `end_date`),
+    KEY `idx_cn_stock_income_ann_date` (`ann_date`),
+    KEY `idx_cn_stock_income_f_ann_date` (`f_ann_date`),
+    KEY `idx_cn_stock_income_report_type` (`report_type`),
+    KEY `idx_cn_stock_income_netprofit` (`end_date`, `n_income_attr_p`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;

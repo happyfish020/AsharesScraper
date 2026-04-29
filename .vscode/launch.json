@@ -11,13 +11,13 @@
             "program": "runner.py",//"rotatain_data_loader.py" ,//"runner.py" ,// "fetch_etf_data.py", //"ak_option_sse_daily_sina.py", //"runner.py" ,//"ak_sector_defined.py",//"ak_security_master.py"  , // "runner.py",
             "console": "integratedTerminal",
             "args": [
-                "--tasks", "his_stocks",// "rotation", // "rotation", //"index", //"etf", // "etf",// "stock",
+                "--tasks", "stock" , //"his_stocks",// "rotation", // "rotation", //"index", //"etf", // "etf",// "stock",
                 "--history-start", "2000-01", 
                 "--history-end", "2019-12",
                 "--refresh",
 
                 //"--asof latest",
-                //"--days",
+                 "--days", "60",
                 //"300"
                 //'audit', 'etf', 'futures', 'index', 'options', 'rotation', 'stock'
             ],

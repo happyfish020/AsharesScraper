@@ -14,7 +14,8 @@ class RunnerConfig:
     end_date: Optional[str] = None     # YYYYMMDD
     his_start_date: Optional[str] = None   # YYYYMMDD (for his_stocks task)
     his_end_date: Optional[str] = None     # YYYYMMDD (for his_stocks task)
-    his_source_order: str = "baostock,ak"
+    his_source_order: str = "ak,yf"
+    data_source_flag: str = "tu"
     his_max_symbols: int = 0
     his_symbols: List[str] = field(default_factory=list)
     his_ignore_state: bool = False

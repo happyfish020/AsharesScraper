@@ -27,6 +27,28 @@ class DbAccessor:
     log: object
 
     @staticmethod
+    def _drop_fully_empty_quote_rows(
+        df: pd.DataFrame,
+        *,
+        id_col: str,
+        label: str,
+    ) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        quote_cols = [c for c in ["open", "close", "high", "low", "pre_close", "volume", "amount", "chg_pct"] if c in df.columns]
+        if not quote_cols:
+            return df
+        keep_mask = df[quote_cols].notna().any(axis=1)
+        dropped = int((~keep_mask).sum())
+        if dropped > 0:
+            sample_ids = []
+            if id_col in df.columns:
+                sample_ids = [str(x) for x in df.loc[~keep_mask, id_col].dropna().astype(str).head(5).tolist()]
+            sample_text = f" sample_{id_col}s={sample_ids}" if sample_ids else ""
+            print(f"[db_accessor] drop fully empty {label} rows={dropped}{sample_text}")
+        return df.loc[keep_mask].copy()
+
+    @staticmethod
     def _to_date_yyyymmdd(s: str) -> dt_date:
         return pd.to_datetime(s, format="%Y%m%d", errors="raise").date()
 
@@ -94,6 +116,11 @@ class DbAccessor:
             if col in df.columns:
                 df[col] = df[col].apply(lambda x: None if pd.isna(x) else f"{float(x):.10g}")
 
+        df = self._drop_fully_empty_quote_rows(df, id_col="symbol", label="stock")
+        if df.empty:
+            self.log.info(f"Symbol: {symbol6} skip insert because all missing rows are fully empty quotes")
+            return 0
+
         try:
             df.to_sql("cn_stock_daily_price", self.engine, if_exists="append", index=False, chunksize=200)
             return len(df)
@@ -113,6 +140,11 @@ class DbAccessor:
             if c not in df.columns:
                 df[c] = None
         df = df[table_cols]
+
+        df = self._drop_fully_empty_quote_rows(df, id_col="index_code", label="index")
+        if df.empty:
+            self.log.info(f"Index: {index_code} skip insert because all missing rows are fully empty quotes")
+            return 0
 
         try:
             df.to_sql("cn_index_daily_price", self.engine, if_exists="append", index=False, chunksize=200)

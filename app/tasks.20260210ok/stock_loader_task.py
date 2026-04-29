@@ -10,7 +10,6 @@ from typing import List, Tuple, Set
 
 import pandas as pd
 import pytz
-import baostock as bs
 import akshare as ak
 
 #from price_loader import load_stock_price_eastmoney, normalize_stock_code
@@ -154,12 +153,6 @@ class StockLoaderTask:
     ) -> None:
         activate_tunnel("cn")
 
-        lg = bs.login()
-        if lg.error_code != '0':
-            self.log.error(f"baostock login failed: {lg.error_msg}")
-        else:
-            self.log.info("baostock login success (global for this batch)")
-
         scanned: Set[str] = state.load_scanned() if is_continue_load else set()
         failed: Set[str] = state.load_failed() if is_continue_load else set()
 
@@ -197,7 +190,7 @@ class StockLoaderTask:
                     adjust="qfq",
                 )
                 if df is None or df.empty:
-                    raise RuntimeError("empty data from both baostock and eastmoney")
+                    raise RuntimeError("empty data from eastmoney")
 
                 stock_trade_days = set(df["trade_date"].dt.date.unique())
                 missing = stock_trade_days - existing_days
@@ -234,12 +227,6 @@ class StockLoaderTask:
             else:
                 time.sleep(random.uniform(0.3, 0.8))
 
-        try:
-            bs.logout()
-        except Exception:
-            pass
-        self.log.info("baostock logout")
-
         state.save_scanned(scanned)
         state.save_failed(failed)
         self.log.info("[DONE][STOCK] loader finished")
@@ -255,64 +242,7 @@ class StockLoaderTask:
         name: str,
         adjust: str = "qfq",
     ) -> pd.DataFrame | None:
-        df = self._load_stock_price_baostock_internal( stock_code, start_date, end_date, adjust=adjust)
-        if df is not None and not df.empty:
-            return df
-        self.log.warning(f"baostock failed for {stock_code}, switching to eastmoney")
-        return self.load_stock_price_eastmoney(stock_code=stock_code, start_date=start_date, end_date=end_date, name=name)
-
-    def _load_stock_price_baostock_internal(
-        self,  stock_code: str, start_date: str, end_date: str, adjust: str = "qfq"
-    ) -> pd.DataFrame | None:
-        code = str(stock_code).strip()
-        # baostock expects: sh.600000 / sz.000001
-        if code.startswith(("6", "9")):
-            symbol = f"sh.{code}"
-        elif code.startswith(("0", "3")):
-            symbol = f"sz.{code}"
-        else:
-            return None
-
-        fields = "date,open,high,low,close,preclose,volume,amount,turn"
-        rs = bs.query_history_k_data_plus(
-            symbol,
-            fields=fields,
-            start_date=pd.to_datetime(start_date).strftime("%Y-%m-%d"),
-            end_date=pd.to_datetime(end_date).strftime("%Y-%m-%d"),
-            frequency="d",
-            adjustflag="2" if adjust == "qfq" else "3" if adjust == "hfq" else "1",
-        )
-        if rs.error_code != '0':
-            self.log.warning(f"baostock query failed {symbol}: {rs.error_msg}")
-            return None
-
-        data = []
-        while rs.next():
-            data.append(rs.get_row_data())
-        if not data:
-            return None
-
-        df = pd.DataFrame(data, columns=fields.split(","))
-        df["trade_date"] = pd.to_datetime(df["date"])
-        df.rename(columns={
-            "preclose": "pre_close",
-            "turn": "turnover_rate",
-        }, inplace=True)
-        for col in ["open","high","low","close","pre_close","volume","amount","turnover_rate"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-        # compute derived cols to align with eastmoney schema if needed
-        if "chg_pct" not in df.columns:
-            df["chg_pct"] = (df["close"] / df["pre_close"] - 1.0) * 100.0
-        if "change" not in df.columns:
-            df["change"] = df["close"] - df["pre_close"]
-        if "amplitude" not in df.columns:
-            df["amplitude"] = (df["high"] - df["low"]) / df["pre_close"] * 100.0
-
-        keep = ["trade_date","open","close","pre_close","high","low","volume","amount","amplitude","chg_pct","change","turnover_rate"]
-        df = df[keep]
-        df["source"] = "baostock"
-        return df
+        return self.load_stock_price_eastmoney(stock_code=stock_code, start_date=start_date, end_date=end_date, name=name, adjust=adjust)
 
     # ------------------------
     # intraday helper
@@ -322,31 +252,28 @@ class StockLoaderTask:
 
         reference_date = (now - timedelta(days=1)).date() if now.hour < 8 else now.date()
         activate_tunnel("cn")
-        lg = bs.login()
-        if lg.error_code != '0':
-            self.log.info(f"baostock login failed: {lg.error_msg}")
-            is_weekend = reference_date.weekday() >= 5
-            in_session = dt_time(9, 30) <= now.time() < dt_time(15, 0)
-            fallback_last_date = reference_date - timedelta(days=(reference_date.weekday() + 2) % 7 if is_weekend else 0)
-            return (not is_weekend and in_session, fallback_last_date.strftime('%Y-%m-%d'))
 
         try:
-            start = (reference_date - timedelta(days=60)).strftime('%Y-%m-%d')
-            end = reference_date.strftime('%Y-%m-%d')
-            rs = bs.query_trade_dates(start_date=start, end_date=end)
-            if rs.error_code != '0':
-                raise RuntimeError(rs.error_msg)
+            df = ak.tool_trade_date_hist_sina()
+            if df is None or df.empty:
+                raise RuntimeError("tool_trade_date_hist_sina returned empty")
 
-            data_list = []
-            while rs.next():
-                data_list.append(rs.get_row_data())
-            trade_df = pd.DataFrame(data_list, columns=rs.fields)
-            trade_df['calendar_date'] = pd.to_datetime(trade_df['calendar_date'])
-            trade_df['is_trading_day'] = trade_df['is_trading_day'].astype(int)
-            trading_days = trade_df[trade_df['is_trading_day'] == 1]['calendar_date'].dt.date.values
-            if len(trading_days) == 0:
-                raise RuntimeError("No trading days in last 60 days")
-            last_trade_date_obj = max(d for d in trading_days if d <= reference_date)
+            col = df.columns[0]
+            def to_date(v):
+                if isinstance(v, date):
+                    return v
+                if hasattr(v, "date"):
+                    return v.date()
+                s = str(v).strip()
+                if len(s) == 10:
+                    return date.fromisoformat(s)
+                return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+
+            trade_dates = sorted([to_date(v) for v in df[col].tolist()])
+            recent = [d for d in trade_dates if d <= reference_date]
+            if not recent:
+                raise RuntimeError("No trading days found")
+            last_trade_date_obj = recent[-1]
             last_trade_date_str = last_trade_date_obj.strftime('%Y-%m-%d')
 
             is_today_trading_day = last_trade_date_obj == now.date()
@@ -359,11 +286,6 @@ class StockLoaderTask:
             in_session = dt_time(9, 30) <= now.time() < dt_time(15, 0)
             fallback_last = reference_date - timedelta(days=(reference_date.weekday() - 4) % 7)
             return (not is_weekend and in_session, fallback_last.strftime('%Y-%m-%d'))
-        finally:
-            try:
-                bs.logout()
-            except Exception:
-                pass
 
     def _bulk_insert_latest_day_with_spot(self, latest_trading_date: str, ) -> bool:
         try:
