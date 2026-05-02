@@ -14,7 +14,7 @@ Implemented objects:
 Current loaded market-cap coverage:
 
 - `cn_stock_daily_basic`
-- loaded for `2026-01-09` to `2026-02-27`
+- historical coverage depends on your latest backfill run
 - total rows loaded: `163956`
 
 Important date boundary:
@@ -146,7 +146,7 @@ Free-source notes:
 - this is snapshot-oriented, not full historical daily-basic history
 - when free fallback is used, the loader writes only the latest requested date
 
-## Weekly Task
+## Runner Task
 
 A runner task is now available:
 
@@ -160,23 +160,24 @@ python -m app.cli --tasks stock_basic --asof latest
 
 Default behavior:
 
-- runs only on Monday
-- skips automatically on other weekdays
-- refreshes `cn_stock_daily_basic`
+- intended for daily use
+- defaults to `price` calendar for better trade-date coverage
+- refreshes a recent rolling window with upsert semantics
 - rebuilds `cn_stock_leader_score_v1`
 - rebuilds `cn_stock_leader_score_v2`
 
 Useful env vars:
 
-- `STOCK_BASIC_WEEKLY_ENABLED=1`
-- `STOCK_BASIC_WEEKLY_FORCE=1`
-- `STOCK_BASIC_WEEKLY_WEEKDAY=0`
-- `STOCK_BASIC_WEEKLY_PROVIDER=auto`
-- `STOCK_BASIC_WEEKLY_CALENDAR_SOURCE=board-map`
-- `STOCK_BASIC_WEEKLY_LOOKBACK_DAYS=14`
-- `STOCK_BASIC_WEEKLY_SOURCE_LABEL=tushare_daily_basic`
-- `STOCK_BASIC_WEEKLY_AKSHARE_WORKERS=12`
-- `STOCK_BASIC_WEEKLY_AKSHARE_TIMEOUT=15`
+- `STOCK_BASIC_ENABLED=1`
+- `STOCK_BASIC_FORCE=0`
+- `STOCK_BASIC_PROVIDER=tushare`
+- `STOCK_BASIC_CALENDAR_SOURCE=price`
+- `STOCK_BASIC_LOOKBACK_DAYS=7`
+- `STOCK_BASIC_DATE_ORDER=asc`
+- `STOCK_BASIC_BATCH_SIZE=0`
+- `STOCK_BASIC_SOURCE_LABEL=tushare_daily_basic`
+- `STOCK_BASIC_AKSHARE_WORKERS=12`
+- `STOCK_BASIC_AKSHARE_TIMEOUT=15`
 
 ## Apply Order
 

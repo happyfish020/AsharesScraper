@@ -64,7 +64,7 @@ def normalize_daily_basic(raw: pd.DataFrame, source_label: str) -> pd.DataFrame:
     return out[UPSERT_COLS].copy()
 
 
-def iter_trade_dates(engine, start_date: date, end_date: date, calendar_source: str) -> List[date]:
+def iter_trade_dates(engine, start_date: date, end_date: date, calendar_source: str, descending: bool = False) -> List[date]:
     if calendar_source == "board-map":
         sql = """
             SELECT DISTINCT trade_date
@@ -92,12 +92,22 @@ def iter_trade_dates(engine, start_date: date, end_date: date, calendar_source: 
         dt = pd.to_datetime(row[0], errors="coerce")
         if pd.notna(dt):
             dates.append(dt.date())
+    if descending:
+        dates.reverse()
     return dates
 
 
 def chunked(records: List[dict], chunk_size: int) -> Iterable[List[dict]]:
     for i in range(0, len(records), chunk_size):
         yield records[i : i + chunk_size]
+
+
+def chunked_dates(trade_dates: List[date], batch_size: int) -> Iterable[List[date]]:
+    if batch_size <= 0:
+        yield trade_dates
+        return
+    for i in range(0, len(trade_dates), batch_size):
+        yield trade_dates[i : i + batch_size]
 
 
 def upsert_dataframe(engine, df: pd.DataFrame, chunk_size: int = 4000) -> int:
@@ -262,9 +272,11 @@ def load_daily_basic_tushare(
     calendar_source: str,
     source_label: str,
     token: str,
+    descending: bool = False,
+    batch_size: int = 0,
     log=None,
 ) -> tuple[int, int, List[date], str]:
-    trade_dates = iter_trade_dates(engine, start_date, end_date, calendar_source)
+    trade_dates = iter_trade_dates(engine, start_date, end_date, calendar_source, descending=descending)
     if not trade_dates:
         return 0, 0, [], "tushare"
 
@@ -272,13 +284,14 @@ def load_daily_basic_tushare(
     total_rows = 0
     total_affected = 0
     progress = ProgressLogger(name="stock_basic.tushare", total=len(trade_dates), unit="trade_dates", log=log, every=5, min_interval_seconds=15.0)
-    for trade_dt in trade_dates:
-        raw = fetch_daily_basic(pro, trade_dt)
-        df = normalize_daily_basic(raw, source_label)
-        affected = upsert_dataframe(engine, df)
-        total_rows += int(len(df))
-        total_affected += affected
-        progress.update(current_item=str(trade_dt), rows=int(len(df)), affected=affected)
+    for batch_dates in chunked_dates(trade_dates, batch_size):
+        for trade_dt in batch_dates:
+            raw = fetch_daily_basic(pro, trade_dt)
+            df = normalize_daily_basic(raw, source_label)
+            affected = upsert_dataframe(engine, df)
+            total_rows += int(len(df))
+            total_affected += affected
+            progress.update(current_item=str(trade_dt), rows=int(len(df)), affected=affected)
     progress.finish()
     return total_rows, total_affected, trade_dates, "tushare"
 
@@ -328,6 +341,18 @@ def main() -> None:
         choices=["board-map", "price"],
         default="board-map",
         help="Trade-date source used to select backfill dates",
+    )
+    parser.add_argument(
+        "--date-order",
+        choices=["asc", "desc"],
+        default="asc",
+        help="Trade-date traversal order; use desc for near-to-far historical backfill",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=0,
+        help="Optional number of trade dates per batch; 0 means one continuous run",
     )
     parser.add_argument("--source-label", default="tushare_daily_basic", help="Source label written into cn_stock_daily_basic")
     parser.add_argument("--akshare-workers", type=int, default=12, help="Thread workers when using akshare fallback")
@@ -379,6 +404,8 @@ def main() -> None:
                 calendar_source=args.calendar_source,
                 source_label=args.source_label,
                 token=token,
+                descending=args.date_order == "desc",
+                batch_size=max(0, int(args.batch_size)),
             )
     except Exception as e:
         if args.provider != "auto":

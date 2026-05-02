@@ -524,6 +524,8 @@ Event 数据采集（Tushare Pro）
 python runner.py --tasks event --asof latest --days 1
 
 详细说明见 docs/Runbook_event.md
+Stock basic 日更 / 历史回填：
+详细说明见 docs/Runbook_stock_basic.md
 
 ---
 

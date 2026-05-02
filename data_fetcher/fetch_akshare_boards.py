@@ -7,7 +7,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from http.client import RemoteDisconnected
 from pathlib import Path
 from typing import Callable
@@ -16,17 +16,39 @@ import akshare as ak
 import pandas as pd
 import requests
 from requests.exceptions import ChunkedEncodingError, ConnectionError, ReadTimeout, RequestException
+from sqlalchemy import text
 
 if __package__ in (None, ""):
+    sys.path.append(str(Path(__file__).resolve().parent.parent))
     sys.path.append(str(Path(__file__).resolve().parent))
-    from config import BOARD_PATHS, DEFAULT_START, FAILED_ROOT, LOG_FILE, RETRY_DELAYS, SOURCE_NAME
+    from app.settings import build_engine
+    from config import (
+        BOARD_CONCEPT_TABLE,
+        BOARD_FAILURE_TABLE,
+        BOARD_INDUSTRY_TABLE,
+        BOARD_PATHS,
+        DEFAULT_START,
+        LOG_FILE,
+        RETRY_DELAYS,
+        SOURCE_NAME,
+    )
 else:
-    from .config import BOARD_PATHS, DEFAULT_START, FAILED_ROOT, LOG_FILE, RETRY_DELAYS, SOURCE_NAME
+    from app.settings import build_engine
+    from .config import (
+        BOARD_CONCEPT_TABLE,
+        BOARD_FAILURE_TABLE,
+        BOARD_INDUSTRY_TABLE,
+        BOARD_PATHS,
+        DEFAULT_START,
+        LOG_FILE,
+        RETRY_DELAYS,
+        SOURCE_NAME,
+    )
 
 
-INVALID_FILENAME = re.compile(r'[\\/:*?"<>|]')
 DATE_FMT = "%Y%m%d"
 OUTPUT_DATE_FMT = "%Y-%m-%d"
+STOP_MESSAGE = "东方财富接口疑似限流/断连，请稍后使用 --resume-failed 继续。"
 SUPPORTED_EXCEPTIONS = (
     RemoteDisconnected,
     ConnectionError,
@@ -36,6 +58,7 @@ SUPPORTED_EXCEPTIONS = (
 )
 STANDARD_COLUMNS = [
     "board_type",
+    "board_code",
     "board_name",
     "trade_date",
     "open",
@@ -48,17 +71,6 @@ STANDARD_COLUMNS = [
     "source",
     "update_time",
 ]
-FAILED_COLUMNS = [
-    "board_type",
-    "board_name",
-    "start_date",
-    "end_date",
-    "error_type",
-    "error_message",
-    "retry_count",
-    "update_time",
-]
-STOP_MESSAGE = "东方财富接口疑似限流/断连，请稍后使用 --resume-failed 继续。"
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Referer": "https://quote.eastmoney.com/",
@@ -76,6 +88,7 @@ class BoardApi:
     list_url: str
     list_params: dict[str, str]
     hist_url: str
+    table_name: str
 
 
 @dataclass(frozen=True)
@@ -91,6 +104,7 @@ class RunOptions:
     batch_cooldown_every: int
     batch_cooldown_min: int
     batch_cooldown_max: int
+    load_csv: bool
 
 
 @dataclass
@@ -125,6 +139,7 @@ BOARD_APIS = {
             "fields": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23,f24,f25,f26,f22,f33,f11,f62,f128,f136,f115,f152,f124,f107,f104,f105,f140,f141,f207,f208,f209,f222",
         },
         hist_url="https://7.push2his.eastmoney.com/api/qt/stock/kline/get",
+        table_name=BOARD_INDUSTRY_TABLE,
     ),
     "concept": BoardApi(
         board_type="concept",
@@ -147,6 +162,7 @@ BOARD_APIS = {
             "fields": "f2,f3,f4,f8,f12,f14,f15,f16,f17,f18,f20,f21,f24,f25,f22,f33,f11,f62,f128,f124,f107,f104,f105,f136",
         },
         hist_url="https://91.push2his.eastmoney.com/api/qt/stock/kline/get",
+        table_name=BOARD_CONCEPT_TABLE,
     ),
 }
 
@@ -157,11 +173,9 @@ def setup_logger() -> logging.Logger:
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-
     file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
-
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
@@ -169,27 +183,28 @@ def setup_logger() -> logging.Logger:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch A-share board daily data in low-frequency recoverable mode.")
+    parser = argparse.ArgumentParser(description="Fetch A-share board daily data and write directly into MySQL.")
     parser.add_argument("--type", choices=["industry", "concept", "all"], default="all")
-    parser.add_argument("--start", default=DEFAULT_START, help="Start date in YYYYMMDD, default: 20200101")
-    parser.add_argument("--end", default=datetime.today().strftime(DATE_FMT), help="End date in YYYYMMDD, default: today")
-    parser.add_argument("--force-refresh", action="store_true", help="Ignore local cache and refetch full history")
-    parser.add_argument("--resume-failed", action="store_true", help="Only rerun boards listed in failed csv")
-    parser.add_argument("--limit", type=int, default=None, help="Only fetch first N boards after filtering")
-    parser.add_argument("--sleep-min", type=int, default=3, help="Sleep minimum seconds after each successful board")
-    parser.add_argument("--sleep-max", type=int, default=8, help="Sleep maximum seconds after each successful board")
-    parser.add_argument("--batch-cooldown-every", type=int, default=10, help="Extra cooldown after every N successful boards")
-    parser.add_argument("--batch-cooldown-min", type=int, default=30, help="Batch cooldown minimum seconds")
-    parser.add_argument("--batch-cooldown-max", type=int, default=90, help="Batch cooldown maximum seconds")
-    parser.add_argument("--board-name", default=None, help="Only fetch a single board by exact board name")
+    parser.add_argument("--start", default=DEFAULT_START)
+    parser.add_argument("--end", default=datetime.today().strftime(DATE_FMT))
+    parser.add_argument("--force-refresh", action="store_true")
+    parser.add_argument("--resume-failed", action="store_true")
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--sleep-min", type=int, default=3)
+    parser.add_argument("--sleep-max", type=int, default=8)
+    parser.add_argument("--batch-cooldown-every", type=int, default=10)
+    parser.add_argument("--batch-cooldown-min", type=int, default=30)
+    parser.add_argument("--batch-cooldown-max", type=int, default=90)
+    parser.add_argument("--board-name", default=None)
+    parser.add_argument("--load-csv", action="store_true", help="Load existing normalized CSVs into MySQL once, without fetching")
     return parser.parse_args()
 
 
-def validate_date(text: str) -> datetime:
-    return datetime.strptime(text, DATE_FMT)
-
-
 def validate_options(args: argparse.Namespace) -> RunOptions:
+    datetime.strptime(args.start, DATE_FMT)
+    datetime.strptime(args.end, DATE_FMT)
+    if args.start > args.end:
+        raise ValueError("start date cannot be greater than end date")
     if args.sleep_min < 0 or args.sleep_max < args.sleep_min:
         raise ValueError("sleep range is invalid")
     if args.batch_cooldown_min < 0 or args.batch_cooldown_max < args.batch_cooldown_min:
@@ -210,12 +225,69 @@ def validate_options(args: argparse.Namespace) -> RunOptions:
         batch_cooldown_every=args.batch_cooldown_every,
         batch_cooldown_min=args.batch_cooldown_min,
         batch_cooldown_max=args.batch_cooldown_max,
+        load_csv=args.load_csv,
     )
 
 
-def sanitize_filename(name: str) -> str:
-    cleaned = INVALID_FILENAME.sub("_", str(name)).strip().strip(".")
-    return cleaned or "unnamed_board"
+def ensure_schema(engine, logger: logging.Logger) -> None:
+    logger.info("ensuring board daily tables in MySQL")
+    ddls = [
+        f"""
+        CREATE TABLE IF NOT EXISTS {BOARD_INDUSTRY_TABLE} (
+            board_code VARCHAR(32) DEFAULT NULL,
+            board_name VARCHAR(80) NOT NULL,
+            trade_date DATE NOT NULL,
+            open DOUBLE DEFAULT NULL,
+            close DOUBLE DEFAULT NULL,
+            high DOUBLE DEFAULT NULL,
+            low DOUBLE DEFAULT NULL,
+            volume DOUBLE DEFAULT NULL,
+            amount DOUBLE DEFAULT NULL,
+            pct_change DOUBLE DEFAULT NULL,
+            source VARCHAR(64) NOT NULL,
+            update_time DATETIME NOT NULL,
+            PRIMARY KEY (board_name, trade_date),
+            KEY idx_{BOARD_INDUSTRY_TABLE}_date (trade_date),
+            KEY idx_{BOARD_INDUSTRY_TABLE}_code (board_code)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS {BOARD_CONCEPT_TABLE} (
+            board_code VARCHAR(32) DEFAULT NULL,
+            board_name VARCHAR(80) NOT NULL,
+            trade_date DATE NOT NULL,
+            open DOUBLE DEFAULT NULL,
+            close DOUBLE DEFAULT NULL,
+            high DOUBLE DEFAULT NULL,
+            low DOUBLE DEFAULT NULL,
+            volume DOUBLE DEFAULT NULL,
+            amount DOUBLE DEFAULT NULL,
+            pct_change DOUBLE DEFAULT NULL,
+            source VARCHAR(64) NOT NULL,
+            update_time DATETIME NOT NULL,
+            PRIMARY KEY (board_name, trade_date),
+            KEY idx_{BOARD_CONCEPT_TABLE}_date (trade_date),
+            KEY idx_{BOARD_CONCEPT_TABLE}_code (board_code)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS {BOARD_FAILURE_TABLE} (
+            board_type VARCHAR(16) NOT NULL,
+            board_name VARCHAR(80) NOT NULL,
+            start_date DATE NOT NULL,
+            end_date DATE NOT NULL,
+            error_type VARCHAR(64) NOT NULL,
+            error_message VARCHAR(500) DEFAULT NULL,
+            retry_count INT NOT NULL DEFAULT 0,
+            update_time DATETIME NOT NULL,
+            PRIMARY KEY (board_type, board_name),
+            KEY idx_{BOARD_FAILURE_TABLE}_type_time (board_type, update_time)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+        """,
+    ]
+    with engine.begin() as conn:
+        for ddl in ddls:
+            conn.execute(text(ddl))
 
 
 def sleep_with_log(logger: logging.Logger, label: str, minimum: int, maximum: int) -> None:
@@ -235,19 +307,9 @@ def retry_call(func: Callable, logger: logging.Logger, action: str, **kwargs):
             if attempt == total_attempts:
                 break
             sleep_seconds = RETRY_DELAYS[attempt - 1]
-            logger.warning(
-                "retry action=%s attempt=%s/%s error_type=%s error=%s next_wait=%ss",
-                action,
-                attempt,
-                total_attempts,
-                type(exc).__name__,
-                exc,
-                sleep_seconds,
-            )
+            logger.warning("retry action=%s attempt=%s/%s error_type=%s error=%s next_wait=%ss", action, attempt, total_attempts, type(exc).__name__, exc, sleep_seconds)
             logger.info("sleep label=retry action=%s seconds=%s", action, sleep_seconds)
             time.sleep(sleep_seconds)
-        except Exception:
-            raise
     raise RetryFailure(action=action, retry_count=len(RETRY_DELAYS), original_error=last_error or RuntimeError("unknown retry failure"))
 
 
@@ -258,58 +320,45 @@ def find_first_column(df: pd.DataFrame, candidates: tuple[str, ...]) -> str | No
     return None
 
 
-def failed_csv_path(board_type: str) -> Path:
-    FAILED_ROOT.mkdir(parents=True, exist_ok=True)
-    return FAILED_ROOT / f"{board_type}_failed.csv"
-
-
-def load_failed_items(board_type: str) -> pd.DataFrame:
-    path = failed_csv_path(board_type)
-    if not path.exists():
-        return pd.DataFrame(columns=FAILED_COLUMNS)
-    return pd.read_csv(path, dtype=str)
-
-
-def upsert_failed_item(
-    board_type: str,
-    board_name: str,
-    start_date: str,
-    end_date: str,
-    error: Exception,
-    retry_count: int,
-    logger: logging.Logger,
-) -> None:
-    path = failed_csv_path(board_type)
-    failed_df = load_failed_items(board_type)
-    update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    record = pd.DataFrame(
-        [
+def upsert_failed_item(engine, board_type: str, board_name: str, start_date: str, end_date: str, error: Exception, retry_count: int, logger: logging.Logger) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"""
+                INSERT INTO {BOARD_FAILURE_TABLE} (
+                    board_type, board_name, start_date, end_date, error_type, error_message, retry_count, update_time
+                )
+                VALUES (:board_type, :board_name, :start_date, :end_date, :error_type, :error_message, :retry_count, :update_time)
+                ON DUPLICATE KEY UPDATE
+                    start_date = VALUES(start_date),
+                    end_date = VALUES(end_date),
+                    error_type = VALUES(error_type),
+                    error_message = VALUES(error_message),
+                    retry_count = VALUES(retry_count),
+                    update_time = VALUES(update_time)
+                """
+            ),
             {
                 "board_type": board_type,
                 "board_name": board_name,
-                "start_date": start_date,
-                "end_date": end_date,
+                "start_date": datetime.strptime(start_date, DATE_FMT).date(),
+                "end_date": datetime.strptime(end_date, DATE_FMT).date(),
                 "error_type": type(error).__name__,
-                "error_message": str(error),
-                "retry_count": str(retry_count),
-                "update_time": update_time,
-            }
-        ]
-    )
-    merged = pd.concat([failed_df, record], ignore_index=True)
-    merged = merged.drop_duplicates(subset=["board_name"], keep="last")
-    merged.to_csv(path, index=False, encoding="utf-8-sig")
-    logger.warning("failed_saved board_type=%s board_name=%s failed_csv=%s", board_type, board_name, path)
+                "error_message": str(error)[:500],
+                "retry_count": retry_count,
+                "update_time": datetime.now(),
+            },
+        )
+    logger.warning("failed_saved board_type=%s board_name=%s table=%s", board_type, board_name, BOARD_FAILURE_TABLE)
 
 
-def remove_failed_item(board_type: str, board_name: str, logger: logging.Logger) -> None:
-    path = failed_csv_path(board_type)
-    if not path.exists():
-        return
-    failed_df = pd.read_csv(path, dtype=str)
-    updated = failed_df[failed_df["board_name"] != board_name].copy()
-    updated.to_csv(path, index=False, encoding="utf-8-sig")
-    logger.info("failed_cleared board_type=%s board_name=%s failed_csv=%s", board_type, board_name, path)
+def remove_failed_item(engine, board_type: str, board_name: str, logger: logging.Logger) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(f"DELETE FROM {BOARD_FAILURE_TABLE} WHERE board_type=:board_type AND board_name=:board_name"),
+            {"board_type": board_type, "board_name": board_name},
+        )
+    logger.info("failed_cleared board_type=%s board_name=%s table=%s", board_type, board_name, BOARD_FAILURE_TABLE)
 
 
 def fetch_board_list(api: BoardApi, logger: logging.Logger) -> list[dict[str, str]]:
@@ -319,14 +368,11 @@ def fetch_board_list(api: BoardApi, logger: logging.Logger) -> list[dict[str, st
         logger.warning("%s board list via akshare failed: %s; fallback to direct Eastmoney API", api.board_type, exc)
         raw_df = fetch_board_list_direct(api, logger)
     if raw_df is None or raw_df.empty:
-        logger.warning("%s board list is empty", api.board_type)
         return []
-
     name_col = find_first_column(raw_df, api.list_name_candidates)
     code_col = find_first_column(raw_df, api.list_code_candidates)
     if not name_col:
         raise KeyError(f"missing board name column for {api.board_type}: {list(raw_df.columns)}")
-
     boards: list[dict[str, str]] = []
     seen: set[str] = set()
     for _, row in raw_df.iterrows():
@@ -334,8 +380,7 @@ def fetch_board_list(api: BoardApi, logger: logging.Logger) -> list[dict[str, st
         if not board_name or board_name in seen:
             continue
         seen.add(board_name)
-        board_code = str(row.get(code_col, "")).strip() if code_col else ""
-        boards.append({"board_name": board_name, "board_code": board_code})
+        boards.append({"board_name": board_name, "board_code": str(row.get(code_col, "")).strip() if code_col else ""})
     return boards
 
 
@@ -345,283 +390,236 @@ def fetch_board_list_direct(api: BoardApi, logger: logging.Logger) -> pd.DataFra
     while True:
         params = dict(api.list_params)
         params["pn"] = str(page)
-        response = retry_call(
-            requests.get,
-            logger=logger,
-            action=f"fetch {api.board_type} board list direct page={page}",
-            url=api.list_url,
-            params=params,
-            headers=REQUEST_HEADERS,
-            timeout=20,
-        )
+        response = retry_call(requests.get, logger=logger, action=f"fetch {api.board_type} board list direct page={page}", url=api.list_url, params=params, headers=REQUEST_HEADERS, timeout=20)
         response.raise_for_status()
-        payload = response.json()
-        diff = ((payload.get("data") or {}).get("diff")) or []
+        diff = ((response.json().get("data") or {}).get("diff")) or []
         if not diff:
             break
         all_rows.extend(diff)
         if len(diff) < int(params["pz"]):
             break
         page += 1
-
-    if not all_rows:
-        return pd.DataFrame()
-
-    return pd.DataFrame(all_rows).rename(
-        columns={
-            "f12": "板块代码",
-            "f14": "板块名称",
-            "f2": "最新价",
-            "f3": "涨跌幅",
-            "f4": "涨跌额",
-            "f8": "换手率",
-            "f20": "总市值",
-            "f104": "上涨家数",
-            "f105": "下跌家数",
-            "f128": "领涨股票",
-            "f136": "领涨股票-涨跌幅",
-        }
-    )
-
-
-def next_start_date(existing_path: Path, cli_start: str, force_refresh: bool, logger: logging.Logger) -> str:
-    if force_refresh or not existing_path.exists():
-        return cli_start
-    try:
-        existing_df = pd.read_csv(existing_path, usecols=["trade_date"])
-    except ValueError:
-        existing_df = pd.read_csv(existing_path)
-    except Exception as exc:
-        logger.warning("existing_file_read_failed path=%s error=%s fallback_start=%s", existing_path, exc, cli_start)
-        return cli_start
-
-    if "trade_date" not in existing_df.columns or existing_df.empty:
-        return cli_start
-
-    trade_dates = pd.to_datetime(existing_df["trade_date"], errors="coerce")
-    max_date = trade_dates.max()
-    if pd.isna(max_date):
-        return cli_start
-    return max(cli_start, (max_date + timedelta(days=1)).strftime(DATE_FMT))
+    return pd.DataFrame(all_rows).rename(columns={"f12": "板块代码", "f14": "板块名称"}) if all_rows else pd.DataFrame()
 
 
 def fetch_board_history(api: BoardApi, board_name: str, board_code: str, start_date: str, end_date: str, logger: logging.Logger) -> pd.DataFrame:
-    kwargs = {"symbol": board_name, "start_date": start_date, "end_date": end_date}
-    if api.board_type == "industry":
-        kwargs["period"] = api.hist_period_value
-    else:
-        kwargs["period"] = api.hist_period_value
     try:
-        return retry_call(api.hist_fetcher, logger=logger, action=f"fetch {api.board_type} history via akshare board={board_name}", **kwargs)
+        return retry_call(
+            api.hist_fetcher,
+            logger=logger,
+            action=f"fetch {api.board_type} history via akshare board={board_name}",
+            symbol=board_name,
+            start_date=start_date,
+            end_date=end_date,
+            period=api.hist_period_value,
+        )
     except RetryFailure as exc:
         logger.warning("%s history via akshare failed for %s: %s; fallback to direct Eastmoney API", api.board_type, board_name, exc)
-        return fetch_board_history_direct(api, board_name=board_name, board_code=board_code, start_date=start_date, end_date=end_date, logger=logger)
+        if not board_code:
+            raise exc
+        response = retry_call(
+            requests.get,
+            logger=logger,
+            action=f"fetch {api.board_type} history direct board={board_name}",
+            url=api.hist_url,
+            params={
+                "secid": f"90.{board_code}",
+                "fields1": "f1,f2,f3,f4,f5,f6",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+                "klt": "101",
+                "fqt": "0",
+                "beg": start_date,
+                "end": end_date,
+                "smplmt": "10000",
+                "lmt": "1000000",
+            },
+            headers=REQUEST_HEADERS,
+            timeout=20,
+        )
+        response.raise_for_status()
+        klines = ((response.json().get("data") or {}).get("klines")) or []
+        if not klines:
+            return pd.DataFrame()
+        df = pd.DataFrame([item.split(",") for item in klines])
+        df.columns = ["日期", "开盘", "收盘", "最高", "最低", "成交量", "成交额", "振幅", "涨跌幅", "涨跌额", "换手率"]
+        return df
 
 
-def fetch_board_history_direct(api: BoardApi, board_name: str, board_code: str, start_date: str, end_date: str, logger: logging.Logger) -> pd.DataFrame:
-    if not board_code:
-        raise ValueError(f"missing board code for {board_name}")
-    response = retry_call(
-        requests.get,
-        logger=logger,
-        action=f"fetch {api.board_type} history direct board={board_name}",
-        url=api.hist_url,
-        params={
-            "secid": f"90.{board_code}",
-            "fields1": "f1,f2,f3,f4,f5,f6",
-            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-            "klt": "101",
-            "fqt": "0",
-            "beg": start_date,
-            "end": end_date,
-            "smplmt": "10000",
-            "lmt": "1000000",
-        },
-        headers=REQUEST_HEADERS,
-        timeout=20,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    klines = ((payload.get("data") or {}).get("klines")) or []
-    if not klines:
-        return pd.DataFrame()
-    temp_df = pd.DataFrame([item.split(",") for item in klines])
-    temp_df.columns = ["日期", "开盘", "收盘", "最高", "最低", "成交量", "成交额", "振幅", "涨跌幅", "涨跌额", "换手率"]
-    return temp_df
-
-
-def standardize_history(raw_df: pd.DataFrame, board_type: str, board_name: str, update_time: str) -> pd.DataFrame:
+def standardize_history(raw_df: pd.DataFrame, board_type: str, board_code: str, board_name: str, update_time: str) -> pd.DataFrame:
     if raw_df is None or raw_df.empty:
         return pd.DataFrame(columns=STANDARD_COLUMNS)
-
-    renamed = raw_df.rename(
-        columns={
-            "日期": "trade_date",
-            "开盘": "open",
-            "收盘": "close",
-            "最高": "high",
-            "最低": "low",
-            "成交量": "volume",
-            "成交额": "amount",
-            "涨跌幅": "pct_change",
-        }
-    ).copy()
+    renamed = raw_df.rename(columns={"日期": "trade_date", "开盘": "open", "收盘": "close", "最高": "high", "最低": "low", "成交量": "volume", "成交额": "amount", "涨跌幅": "pct_change"}).copy()
     for column in ("trade_date", "open", "close", "high", "low", "volume", "amount", "pct_change"):
         if column not in renamed.columns:
             renamed[column] = pd.NA
-
     out = renamed[["trade_date", "open", "close", "high", "low", "volume", "amount", "pct_change"]].copy()
     out["trade_date"] = pd.to_datetime(out["trade_date"], errors="coerce").dt.strftime(OUTPUT_DATE_FMT)
     out = out[out["trade_date"].notna()].copy()
     for column in ("open", "close", "high", "low", "volume", "amount", "pct_change"):
         out[column] = pd.to_numeric(out[column], errors="coerce")
     out.insert(0, "board_name", board_name)
+    out.insert(0, "board_code", board_code)
     out.insert(0, "board_type", board_type)
     out["source"] = SOURCE_NAME
     out["update_time"] = update_time
     return out[STANDARD_COLUMNS]
 
 
-def merge_normalized(existing_path: Path, new_df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    existing_df = pd.read_csv(existing_path) if existing_path.exists() else pd.DataFrame(columns=STANDARD_COLUMNS)
-    merged = pd.concat([existing_df, new_df], ignore_index=True)
-    merged["trade_date"] = pd.to_datetime(merged["trade_date"], errors="coerce").dt.strftime(OUTPUT_DATE_FMT)
-    merged = merged[merged["trade_date"].notna()].copy()
-    existing_dates = set(existing_df["trade_date"].dropna().astype(str)) if "trade_date" in existing_df.columns else set()
-    merged = merged.drop_duplicates(subset=["trade_date"], keep="last").sort_values("trade_date").reset_index(drop=True)
-    new_rows = sum(1 for trade_date in merged["trade_date"].astype(str) if trade_date not in existing_dates)
-    return merged, new_rows
+def resolve_db_start_date(engine, api: BoardApi, board_name: str, cli_start: str, force_refresh: bool) -> str:
+    if force_refresh:
+        return cli_start
+    with engine.connect() as conn:
+        max_date = conn.execute(text(f"SELECT MAX(trade_date) FROM {api.table_name} WHERE board_name=:board_name"), {"board_name": board_name}).scalar()
+    if max_date is None:
+        return cli_start
+    return max(cli_start, datetime.strftime(max_date, DATE_FMT))
 
 
-def merge_raw(existing_path: Path, new_df: pd.DataFrame, board_type: str, board_name: str, update_time: str) -> pd.DataFrame:
-    raw = new_df.copy()
-    raw["board_type"] = board_type
-    raw["board_name"] = board_name
-    raw["source"] = SOURCE_NAME
-    raw["update_time"] = update_time
-    if "日期" in raw.columns and "trade_date" not in raw.columns:
-        raw["trade_date"] = pd.to_datetime(raw["日期"], errors="coerce").dt.strftime(OUTPUT_DATE_FMT)
-    elif "trade_date" in raw.columns:
-        raw["trade_date"] = pd.to_datetime(raw["trade_date"], errors="coerce").dt.strftime(OUTPUT_DATE_FMT)
+def save_board_to_db(engine, api: BoardApi, board_df: pd.DataFrame, logger: logging.Logger) -> int:
+    if board_df.empty:
+        return 0
+    rows = []
+    for row in board_df.to_dict(orient="records"):
+        rows.append(
+            {
+                "board_code": row["board_code"] or None,
+                "board_name": row["board_name"],
+                "trade_date": datetime.strptime(str(row["trade_date"]), OUTPUT_DATE_FMT).date(),
+                "open": None if pd.isna(row["open"]) else float(row["open"]),
+                "close": None if pd.isna(row["close"]) else float(row["close"]),
+                "high": None if pd.isna(row["high"]) else float(row["high"]),
+                "low": None if pd.isna(row["low"]) else float(row["low"]),
+                "volume": None if pd.isna(row["volume"]) else float(row["volume"]),
+                "amount": None if pd.isna(row["amount"]) else float(row["amount"]),
+                "pct_change": None if pd.isna(row["pct_change"]) else float(row["pct_change"]),
+                "source": row["source"],
+                "update_time": datetime.strptime(str(row["update_time"]), "%Y-%m-%d %H:%M:%S"),
+            }
+        )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"""
+                INSERT INTO {api.table_name} (
+                    board_code, board_name, trade_date, open, close, high, low, volume, amount, pct_change, source, update_time
+                )
+                VALUES (
+                    :board_code, :board_name, :trade_date, :open, :close, :high, :low, :volume, :amount, :pct_change, :source, :update_time
+                )
+                ON DUPLICATE KEY UPDATE
+                    board_code = VALUES(board_code),
+                    open = VALUES(open),
+                    close = VALUES(close),
+                    high = VALUES(high),
+                    low = VALUES(low),
+                    volume = VALUES(volume),
+                    amount = VALUES(amount),
+                    pct_change = VALUES(pct_change),
+                    source = VALUES(source),
+                    update_time = VALUES(update_time)
+                """
+            ),
+            rows,
+        )
+    logger.info("db_upsert table=%s rows=%s board_name=%s", api.table_name, len(rows), board_df.iloc[0]["board_name"])
+    return len(rows)
 
-    if existing_path.exists():
-        existing_raw = pd.read_csv(existing_path)
-        raw = pd.concat([existing_raw, raw], ignore_index=True, sort=False)
 
-    if "trade_date" in raw.columns:
-        raw = raw[raw["trade_date"].notna()].copy()
-        raw = raw.drop_duplicates(subset=["trade_date"], keep="last").sort_values("trade_date").reset_index(drop=True)
-    return raw
+def load_existing_csvs(engine, api: BoardApi, logger: logging.Logger) -> int:
+    csv_dir = BOARD_PATHS[api.board_type].normalized_dir
+    if not csv_dir.exists():
+        logger.info("csv_load skipped board_type=%s dir_missing=%s", api.board_type, csv_dir)
+        return 0
+    total_rows = 0
+    for path in sorted(csv_dir.glob("*.csv")):
+        df = pd.read_csv(path)
+        if df.empty:
+            continue
+        if "board_type" not in df.columns:
+            df["board_type"] = api.board_type
+        if "board_code" not in df.columns:
+            df["board_code"] = None
+        if "source" not in df.columns:
+            df["source"] = SOURCE_NAME
+        if "update_time" not in df.columns:
+            df["update_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        df = df[[col for col in STANDARD_COLUMNS if col in df.columns]].copy()
+        missing_cols = [col for col in STANDARD_COLUMNS if col not in df.columns]
+        for col in missing_cols:
+            df[col] = None
+        df = df[STANDARD_COLUMNS]
+        total_rows += save_board_to_db(engine, api, df, logger)
+        logger.info("csv_loaded table=%s file=%s rows=%s", api.table_name, path, len(df))
+    return total_rows
 
 
-def ensure_output_dirs(board_type: str) -> None:
-    paths = BOARD_PATHS[board_type]
-    paths.raw_dir.mkdir(parents=True, exist_ok=True)
-    paths.normalized_dir.mkdir(parents=True, exist_ok=True)
-    FAILED_ROOT.mkdir(parents=True, exist_ok=True)
-
-
-def build_board_queue(api: BoardApi, options: RunOptions, logger: logging.Logger) -> list[dict[str, str]]:
+def build_board_queue(api: BoardApi, options: RunOptions, engine, logger: logging.Logger) -> list[dict[str, str]]:
     boards = fetch_board_list(api, logger)
     board_map = {item["board_name"]: item for item in boards}
-
     if options.resume_failed:
-        failed_df = load_failed_items(api.board_type)
-        failed_names = [str(name).strip() for name in failed_df.get("board_name", pd.Series(dtype=str)).tolist() if str(name).strip()]
+        with engine.connect() as conn:
+            failed_rows = conn.execute(text(f"SELECT board_name FROM {BOARD_FAILURE_TABLE} WHERE board_type=:board_type ORDER BY update_time DESC"), {"board_type": api.board_type}).fetchall()
+        failed_names = [row[0] for row in failed_rows]
         logger.info("resume_failed board_type=%s failed_count=%s", api.board_type, len(failed_names))
         boards = [board_map[name] for name in failed_names if name in board_map]
-
     if options.board_name:
         boards = [item for item in boards if item["board_name"] == options.board_name]
         logger.info("board_name_filter board_type=%s board_name=%s matched=%s", api.board_type, options.board_name, len(boards))
-
     if options.limit is not None:
         boards = boards[: options.limit]
         logger.info("limit_applied board_type=%s limit=%s remaining=%s", api.board_type, options.limit, len(boards))
-
     return boards
 
 
-def process_board(api: BoardApi, board: dict[str, str], options: RunOptions, logger: logging.Logger) -> tuple[str, int]:
+def process_board(engine, api: BoardApi, board: dict[str, str], options: RunOptions, logger: logging.Logger) -> tuple[str, int]:
     board_name = board["board_name"]
     board_code = board.get("board_code", "")
-    safe_name = sanitize_filename(board_name)
-    paths = BOARD_PATHS[api.board_type]
-    raw_path = paths.raw_dir / f"{safe_name}.csv"
-    normalized_path = paths.normalized_dir / f"{safe_name}.csv"
-    effective_start = next_start_date(normalized_path, options.start_date, options.force_refresh, logger)
-
-    if effective_start > options.end_date:
-        logger.info("[%s] %s skipped reason=no_new_dates normalized_path=%s", api.board_type, board_name, normalized_path)
-        remove_failed_item(api.board_type, board_name, logger)
+    effective_start = resolve_db_start_date(engine, api, board_name, options.start_date, options.force_refresh)
+    if not options.force_refresh and effective_start >= options.end_date:
+        logger.info("[%s] %s skipped reason=no_new_dates table=%s", api.board_type, board_name, api.table_name)
+        remove_failed_item(engine, api.board_type, board_name, logger)
         return "skipped", 0
-
     update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
-        raw_df = fetch_board_history(
-            api,
-            board_name=board_name,
-            board_code=board_code,
-            start_date=effective_start,
-            end_date=options.end_date,
-            logger=logger,
-        )
+        raw_df = fetch_board_history(api, board_name, board_code, effective_start, options.end_date, logger)
     except RetryFailure as exc:
-        upsert_failed_item(api.board_type, board_name, effective_start, options.end_date, exc.original_error, exc.retry_count, logger)
+        upsert_failed_item(engine, api.board_type, board_name, effective_start, options.end_date, exc.original_error, exc.retry_count, logger)
         return "failed", exc.retry_count
     except Exception as exc:
-        upsert_failed_item(api.board_type, board_name, effective_start, options.end_date, exc, 0, logger)
+        upsert_failed_item(engine, api.board_type, board_name, effective_start, options.end_date, exc, 0, logger)
         return "failed", 0
-
     if raw_df is None or raw_df.empty:
-        logger.warning("[%s] %s empty_result range=%s-%s", api.board_type, board_name, effective_start, options.end_date)
-        upsert_failed_item(api.board_type, board_name, effective_start, options.end_date, ValueError("empty_result"), 0, logger)
+        upsert_failed_item(engine, api.board_type, board_name, effective_start, options.end_date, ValueError("empty_result"), 0, logger)
         return "failed", 0
-
-    normalized_df = standardize_history(raw_df, board_type=api.board_type, board_name=board_name, update_time=update_time)
+    normalized_df = standardize_history(raw_df, api.board_type, board_code, board_name, update_time)
     if normalized_df.empty:
-        logger.warning("[%s] %s normalization_empty", api.board_type, board_name)
-        upsert_failed_item(api.board_type, board_name, effective_start, options.end_date, ValueError("normalization_empty"), 0, logger)
+        upsert_failed_item(engine, api.board_type, board_name, effective_start, options.end_date, ValueError("normalization_empty"), 0, logger)
         return "failed", 0
-
-    merged_normalized, new_rows = merge_normalized(normalized_path, normalized_df)
-    merged_raw = merge_raw(raw_path, raw_df, board_type=api.board_type, board_name=board_name, update_time=update_time)
-    merged_raw.to_csv(raw_path, index=False, encoding="utf-8-sig")
-    merged_normalized.to_csv(normalized_path, index=False, encoding="utf-8-sig")
-    remove_failed_item(api.board_type, board_name, logger)
-    logger.info("[%s] %s saved new_rows=%s raw_path=%s normalized_path=%s", api.board_type, board_name, new_rows, raw_path, normalized_path)
-    return "saved", new_rows
+    row_count = save_board_to_db(engine, api, normalized_df, logger)
+    remove_failed_item(engine, api.board_type, board_name, logger)
+    logger.info("[%s] %s saved rows=%s table=%s", api.board_type, board_name, row_count, api.table_name)
+    return "saved", row_count
 
 
-def run_for_type(board_type: str, options: RunOptions, logger: logging.Logger) -> bool:
-    ensure_output_dirs(board_type)
+def run_for_type(engine, board_type: str, options: RunOptions, logger: logging.Logger) -> bool:
     api = BOARD_APIS[board_type]
-    logger.info(
-        "start board_type=%s source=%s start_date=%s end_date=%s force_refresh=%s resume_failed=%s",
-        board_type,
-        SOURCE_NAME,
-        options.start_date,
-        options.end_date,
-        options.force_refresh,
-        options.resume_failed,
-    )
-    boards = build_board_queue(api, options, logger)
-    logger.info("board_type=%s total_boards=%s", board_type, len(boards))
-
+    if options.load_csv:
+        loaded_rows = load_existing_csvs(engine, api, logger)
+        logger.info("csv_load_finished board_type=%s loaded_rows=%s table=%s", board_type, loaded_rows, api.table_name)
+        return True
+    boards = build_board_queue(api, options, engine, logger)
+    logger.info("start board_type=%s source=%s start_date=%s end_date=%s table=%s total_boards=%s", board_type, SOURCE_NAME, options.start_date, options.end_date, api.table_name, len(boards))
     saved_count = 0
     skipped_count = 0
     failed_count = 0
     consecutive_failures = 0
-    stop_early = False
-
     for board in boards:
         try:
-            status, _ = process_board(api, board, options, logger)
+            status, _ = process_board(engine, api, board, options, logger)
         except Exception as exc:
             logger.exception("[%s] %s unexpected_error=%s", board_type, board["board_name"], exc)
-            upsert_failed_item(board_type, board["board_name"], options.start_date, options.end_date, exc, 0, logger)
+            upsert_failed_item(engine, board_type, board["board_name"], options.start_date, options.end_date, exc, 0, logger)
             status = "failed"
-
         if status == "saved":
             saved_count += 1
             consecutive_failures = 0
@@ -636,44 +634,28 @@ def run_for_type(board_type: str, options: RunOptions, logger: logging.Logger) -
             consecutive_failures += 1
             logger.warning("failure_streak board_type=%s current=%s threshold=5", board_type, consecutive_failures)
             if consecutive_failures >= 5:
-                stop_early = True
                 logger.error("stop_early board_type=%s reason=consecutive_failures message=%s", board_type, STOP_MESSAGE)
                 break
-
-    logger.info(
-        "finish board_type=%s saved=%s skipped=%s failed=%s stop_early=%s",
-        board_type,
-        saved_count,
-        skipped_count,
-        failed_count,
-        stop_early,
-    )
-    return not stop_early
+    logger.info("finish board_type=%s saved=%s skipped=%s failed=%s", board_type, saved_count, skipped_count, failed_count)
+    return consecutive_failures < 5
 
 
 def main() -> int:
-    args = parse_args()
     logger = setup_logger()
-    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    logger.info("job_started start_time=%s source=%s akshare_version=%s", started_at, SOURCE_NAME, ak.__version__)
-
+    args = parse_args()
     try:
         options = validate_options(args)
-        start_dt = validate_date(options.start_date)
-        end_dt = validate_date(options.end_date)
     except ValueError as exc:
         logger.error("invalid_parameter error=%s", exc)
         return 1
-
-    if start_dt > end_dt:
-        logger.error("invalid_date_range start=%s end=%s", options.start_date, options.end_date)
-        return 1
-
-    board_types = ["industry", "concept"] if args.type == "all" else [args.type]
+    engine = build_engine()
+    ensure_schema(engine, logger)
+    logger.info("job_started source=%s akshare_version=%s load_csv=%s", SOURCE_NAME, ak.__version__, options.load_csv)
+    run_types = ["industry", "concept"] if args.type == "all" else [args.type]
     exit_code = 0
-    for board_type in board_types:
+    for board_type in run_types:
         try:
-            keep_running = run_for_type(board_type, options, logger)
+            keep_running = run_for_type(engine, board_type, options, logger)
         except Exception as exc:
             logger.exception("board_type=%s terminated_unexpectedly error=%s", board_type, exc)
             logger.error(STOP_MESSAGE)
@@ -683,9 +665,7 @@ def main() -> int:
             logger.error(STOP_MESSAGE)
             exit_code = 1
             break
-
-    ended_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    logger.info("job_finished end_time=%s exit_code=%s", ended_at, exit_code)
+    logger.info("job_finished exit_code=%s", exit_code)
     return exit_code
 
 

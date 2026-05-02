@@ -10,8 +10,14 @@ cd /d "%WORKDIR%"
 
 REM Daily / event-level data only.
 REM stock with --flag tu uses default --days 1 smart latest-day fill.
-echo [DAILY] 1/3 stock + rotation
-"%PYTHON_EXE%" "%RUNNER_PY%" --flag tu --tasks stock,rotation --asof latest --refresh
+echo [DAILY] 1/3 stock + board + stock_basic + rotation
+set STOCK_BASIC_ENABLED=1
+set STOCK_BASIC_PROVIDER=tushare
+set STOCK_BASIC_CALENDAR_SOURCE=price
+set STOCK_BASIC_LOOKBACK_DAYS=7
+set STOCK_BASIC_DATE_ORDER=asc
+set STOCK_BASIC_BATCH_SIZE=0
+"%PYTHON_EXE%" "%RUNNER_PY%" --flag tu --tasks stock,board,stock_basic,rotation --asof latest --refresh
 if errorlevel 1 goto :fail
 
 echo [DAILY] 2/3 index

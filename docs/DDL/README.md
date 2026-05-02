@@ -99,6 +99,12 @@ Load market-cap and daily-basic fields from Tushare:
 python -m app.tools.sync_cn_stock_daily_basic_from_tushare --provider auto --start 2026-01-09 --end 2026-02-27 --calendar-source board-map
 ```
 
+Near-to-far historical backfill:
+
+```powershell
+python -m app.tools.sync_cn_stock_daily_basic_from_tushare --provider tushare --calendar-source price --date-order desc --batch-size 20 --start 2000-01-04 --end 2026-04-29
+```
+
 This loads:
 
 - `cn_stock_daily_basic`
@@ -122,7 +128,7 @@ Then rebuilds:
 
 ## Weekly Runner Task
 
-The runner now includes a weekly stock-basic refresh task:
+The runner now includes a stock-basic refresh task for daily use:
 
 ```powershell
 python -m app.cli --tasks stock_basic --asof latest
@@ -130,21 +136,26 @@ python -m app.cli --tasks stock_basic --asof latest
 
 Behavior:
 
-- intended to run every Monday
-- skips automatically if the selected `asof` date is not Monday
+- intended to run daily after price data is ready
+- refreshes a recent rolling window by default
 - can also be included in `--tasks all`
 
 Env controls:
 
-- `STOCK_BASIC_WEEKLY_ENABLED`
-- `STOCK_BASIC_WEEKLY_FORCE`
-- `STOCK_BASIC_WEEKLY_WEEKDAY`
-- `STOCK_BASIC_WEEKLY_PROVIDER`
-- `STOCK_BASIC_WEEKLY_CALENDAR_SOURCE`
-- `STOCK_BASIC_WEEKLY_LOOKBACK_DAYS`
-- `STOCK_BASIC_WEEKLY_SOURCE_LABEL`
-- `STOCK_BASIC_WEEKLY_AKSHARE_WORKERS`
-- `STOCK_BASIC_WEEKLY_AKSHARE_TIMEOUT`
+- `STOCK_BASIC_ENABLED`
+- `STOCK_BASIC_FORCE`
+- `STOCK_BASIC_PROVIDER`
+- `STOCK_BASIC_CALENDAR_SOURCE`
+- `STOCK_BASIC_LOOKBACK_DAYS`
+- `STOCK_BASIC_DATE_ORDER`
+- `STOCK_BASIC_BATCH_SIZE`
+- `STOCK_BASIC_SOURCE_LABEL`
+- `STOCK_BASIC_AKSHARE_WORKERS`
+- `STOCK_BASIC_AKSHARE_TIMEOUT`
+
+Compatibility:
+
+- legacy `STOCK_BASIC_WEEKLY_*` env vars are still accepted
 
 ## Monthly Fundamental Task
 
