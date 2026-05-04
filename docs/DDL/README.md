@@ -236,7 +236,7 @@ Env controls:
 - `SW_INDUSTRY_DAILY_FORCE` (default: `0`)
 - `SW_INDUSTRY_DAILY_SRC` (default: `SW2021`)
 - `SW_INDUSTRY_DAILY_MASTER_SOURCE` (default: `TUSHARE_SW2021_L1`)
-- `SW_INDUSTRY_DAILY_SLEEP` (default: `0.15` s between codes)
+- `SW_INDUSTRY_DAILY_SLEEP` (default: `7.0` s between codes — sw_daily limit is 10/min)
 - `SW_INDUSTRY_DAILY_SOURCE_LABEL`
 
 Historical backfill:

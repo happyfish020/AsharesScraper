@@ -82,6 +82,10 @@ def fetch_sw_l1_codes_from_tushare(pro, *, src: str) -> List[str]:
     return codes
 
 
+def _is_sw_daily_rate_limit(msg: str) -> bool:
+    return "频率超限" in msg or "每分钟最多访问" in msg or "sw_daily" in msg and "超限" in msg
+
+
 def fetch_sw_daily_with_retry(
     pro,
     *,
@@ -101,7 +105,7 @@ def fetch_sw_daily_with_retry(
             )
         except Exception as e:
             msg = str(e)
-            if "每分钟最多访问该接口10次" not in msg or attempt + 1 == max_retries:
+            if not _is_sw_daily_rate_limit(msg) or attempt + 1 == max_retries:
                 raise
             sleep_sec = 65
             print(f"[SW_DAILY] {ts_code} hit rate limit; sleep {sleep_sec}s then retry {attempt + 2}/{max_retries}")
@@ -217,7 +221,7 @@ def main() -> int:
     p.add_argument("--codes", default="", help="comma-separated ts_code list; default reads from cn_board_industry_master")
     p.add_argument("--token", default="", help="Tushare token; default uses project token resolver")
     p.add_argument("--config", default="", help="Optional config path for token resolver")
-    p.add_argument("--sleep", type=float, default=0.15, help="sleep seconds between codes")
+    p.add_argument("--sleep", type=float, default=7.0, help="sleep seconds between codes (sw_daily limit: 10/min → ≥6s required)")
     p.add_argument("--full", action="store_true", help="full reload by requested range instead of incremental from max(trade_date)")
     args = p.parse_args()
 

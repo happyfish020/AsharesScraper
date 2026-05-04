@@ -45,7 +45,7 @@ class SwIndustryDailyTask:
         force = str(os.getenv("SW_INDUSTRY_DAILY_FORCE", "0")).strip().lower() in {"1", "true", "yes", "on"}
         src = str(os.getenv("SW_INDUSTRY_DAILY_SRC", "SW2021")).strip() or "SW2021"
         master_source = str(os.getenv("SW_INDUSTRY_DAILY_MASTER_SOURCE", "TUSHARE_SW2021_L1")).strip() or "TUSHARE_SW2021_L1"
-        sleep_between = float(os.getenv("SW_INDUSTRY_DAILY_SLEEP", "0.15"))
+        sleep_between = float(os.getenv("SW_INDUSTRY_DAILY_SLEEP", "7.0"))
         source_label = str(os.getenv("SW_INDUSTRY_DAILY_SOURCE_LABEL", "tushare_sw_daily")).strip() or "tushare_sw_daily"
 
         patch_pandas_fillna_method_compat()
