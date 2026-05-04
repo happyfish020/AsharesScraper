@@ -72,6 +72,7 @@ class StockFundamentalMonthlyTask:
         balance_source_label = str(os.getenv("STOCK_FUNDAMENTAL_MONTHLY_BALANCE_SOURCE_LABEL", "tushare_balancesheet")).strip() or "tushare_balancesheet"
         fina_source_label = str(os.getenv("STOCK_FUNDAMENTAL_MONTHLY_FINA_SOURCE_LABEL", "tushare_fina_indicator")).strip() or "tushare_fina_indicator"
         cashflow_source_label = str(os.getenv("STOCK_FUNDAMENTAL_MONTHLY_CASHFLOW_SOURCE_LABEL", "tushare_cashflow")).strip() or "tushare_cashflow"
+        by_symbol = str(os.getenv("STOCK_FUNDAMENTAL_MONTHLY_BY_SYMBOL", "0")).strip().lower() in {"1", "true", "yes", "on"}
         akshare_workers = max(1, int(os.getenv("STOCK_FUNDAMENTAL_MONTHLY_AKSHARE_WORKERS", "8")))
         akshare_timeout = float(os.getenv("STOCK_FUNDAMENTAL_MONTHLY_AKSHARE_TIMEOUT", "15"))
         skip_quality_snapshot = str(os.getenv("STOCK_FUNDAMENTAL_MONTHLY_SKIP_QUALITY_SNAPSHOT", "0")).strip().lower() in {"1", "true", "yes", "on"}
@@ -209,6 +210,7 @@ class StockFundamentalMonthlyTask:
                     source_label=income_source_label,
                     token=token,
                     log=ctx.log,
+                    by_symbol=by_symbol,
                 )
 
         if run_quarterly_financials and balance_start <= end_date:
@@ -224,6 +226,7 @@ class StockFundamentalMonthlyTask:
                     source_label=balance_source_label,
                     token=token,
                     log=ctx.log,
+                    by_symbol=by_symbol,
                 )
 
         if run_quarterly_financials and fina_start <= end_date:
@@ -246,6 +249,7 @@ class StockFundamentalMonthlyTask:
                     source_label=fina_source_label,
                     token=token,
                     log=ctx.log,
+                    by_symbol=by_symbol,
                 )
 
         if run_quarterly_financials and fina_start <= end_date:
@@ -261,6 +265,7 @@ class StockFundamentalMonthlyTask:
                     source_label=cashflow_source_label,
                     token=token,
                     log=ctx.log,
+                    by_symbol=by_symbol,
                 )
 
         apply_ddl(ctx.engine, "docs/DDL/cn_market.cn_stock_fundamental_quality_v1.sql")

@@ -806,6 +806,67 @@ def _fetch_financial_by_ann_date(pro, api_name: str, fields: str, start_date: da
 
 
 
+def _fetch_financial_by_symbol(
+    engine, pro, api_name: str, fields: str,
+    start_date: date, end_date: date, log=None,
+) -> pd.DataFrame:
+    """Backfill path: iterate over every symbol that had price data in the period.
+
+    Using cn_stock_daily_price as the universe source guarantees that delisted
+    stocks from the historical period are included — querying the current active
+    universe would silently miss them.
+    """
+    symbols = _get_universe_symbols_from_price(engine, start_date, end_date)
+    if not symbols:
+        msg = f"[stock_fundamental.{api_name}] no symbols in price table for {start_date}..{end_date}; skip"
+        if log:
+            log.warning(msg)
+        else:
+            print(msg)
+        return pd.DataFrame()
+
+    msg = f"[stock_fundamental.{api_name}] by_symbol universe={len(symbols)} range={start_date}..{end_date}"
+    if log:
+        log.info(msg)
+    else:
+        print(msg)
+
+    api = getattr(pro, api_name)
+    frames = []
+    progress = ProgressLogger(
+        name=f"stock_fundamental.{api_name}",
+        total=len(symbols),
+        unit="symbols",
+        log=log,
+        every=50,
+        min_interval_seconds=15.0,
+    )
+    for symbol in symbols:
+        ts_code = _symbol_to_ts_code(symbol)
+        try:
+            raw = _fetch_with_retry(
+                lambda t=ts_code: api(
+                    ts_code=t,
+                    start_date=start_date.strftime("%Y%m%d"),
+                    end_date=end_date.strftime("%Y%m%d"),
+                    fields=fields,
+                ),
+                f"{api_name} ts_code={ts_code}",
+            )
+        except Exception as exc:
+            progress.update(current_item=ts_code, extra=f"failed={exc}")
+            continue
+        if raw is not None and not raw.empty:
+            frames.append(raw)
+            progress.update(current_item=ts_code, rows=int(len(raw)))
+        else:
+            progress.update(current_item=ts_code)
+    progress.finish()
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True).drop_duplicates()
+
+
 def _get_disclosure_symbols_by_date(engine, start_date: date, end_date: date) -> dict[date, List[str]]:
     """Return disclosure-driven symbols sliced by actual disclosure date only.
 
@@ -979,7 +1040,7 @@ def load_monthly_basic_tushare(engine, start_date: date, end_date: date, calenda
     return total_rows, total_affected, trade_dates, "tushare"
 
 
-def load_income_tushare(engine, start_date: date, end_date: date, source_label: str, token: str, log=None):
+def load_income_tushare(engine, start_date: date, end_date: date, source_label: str, token: str, log=None, by_symbol: bool = False):
     pro = ts.pro_api(token)
     fields = (
         "ts_code,ann_date,f_ann_date,end_date,report_type,comp_type,end_type,basic_eps,diluted_eps,"
@@ -987,14 +1048,17 @@ def load_income_tushare(engine, start_date: date, end_date: date, source_label: 
         "minority_gain,oth_compr_income,t_compr_income,compr_inc_attr_p,compr_inc_attr_m_s,"
         "ebit,ebitda,undist_profit"
     )
-    raw = _fetch_financial_by_disclosure_dates(engine, pro, "income", fields, start_date, end_date, log=log)
+    if by_symbol:
+        raw = _fetch_financial_by_symbol(engine, pro, "income", fields, start_date, end_date, log=log)
+    else:
+        raw = _fetch_financial_by_disclosure_dates(engine, pro, "income", fields, start_date, end_date, log=log)
     df = normalize_income(raw, source_label)
     affected = upsert_income(engine, df)
     loaded_periods = sorted({dt.strftime("%Y%m%d") for dt in df["end_date"].dropna().tolist()}) if not df.empty else []
     return int(len(df)), int(affected), loaded_periods, "tushare"
 
 
-def load_balancesheet_tushare(engine, start_date: date, end_date: date, source_label: str, token: str, log=None):
+def load_balancesheet_tushare(engine, start_date: date, end_date: date, source_label: str, token: str, log=None, by_symbol: bool = False):
     pro = ts.pro_api(token)
     fields = (
         "ts_code,ann_date,f_ann_date,end_date,report_type,comp_type,end_type,money_cap,trad_asset,"
@@ -1003,14 +1067,17 @@ def load_balancesheet_tushare(engine, start_date: date, end_date: date, source_l
         "adv_receipts,total_cur_liab,lt_borr,bond_payable,total_ncl,total_liab,"
         "total_hldr_eqy_exc_min_int,total_hldr_eqy_inc_min_int"
     )
-    raw = _fetch_financial_by_disclosure_dates(engine, pro, "balancesheet", fields, start_date, end_date, log=log)
+    if by_symbol:
+        raw = _fetch_financial_by_symbol(engine, pro, "balancesheet", fields, start_date, end_date, log=log)
+    else:
+        raw = _fetch_financial_by_disclosure_dates(engine, pro, "balancesheet", fields, start_date, end_date, log=log)
     df = normalize_balancesheet(raw, source_label)
     affected = upsert_balancesheet(engine, df)
     loaded_periods = sorted({dt.strftime("%Y%m%d") for dt in df["end_date"].dropna().tolist()}) if not df.empty else []
     return int(len(df)), int(affected), loaded_periods, "tushare"
 
 
-def load_fina_indicator_tushare(engine, start_date: date, end_date: date, source_label: str, token: str, log=None):
+def load_fina_indicator_tushare(engine, start_date: date, end_date: date, source_label: str, token: str, log=None, by_symbol: bool = False):
     pro = ts.pro_api(token)
     fields = (
         "ts_code,ann_date,end_date,report_type,eps,dt_eps,bps,ocfps,roe,roe_dt,roa,roic,"
@@ -1018,7 +1085,10 @@ def load_fina_indicator_tushare(engine, start_date: date, end_date: date, source
         "current_ratio,quick_ratio,ar_turn,arturn_days,inv_turn,invturn_days,"
         "or_yoy,netprofit_yoy,tr_yoy,q_sales_yoy,q_profit_yoy,q_ocf_yoy"
     )
-    raw = _fetch_financial_by_disclosure_dates(engine, pro, "fina_indicator", fields, start_date, end_date, log=log)
+    if by_symbol:
+        raw = _fetch_financial_by_symbol(engine, pro, "fina_indicator", fields, start_date, end_date, log=log)
+    else:
+        raw = _fetch_financial_by_disclosure_dates(engine, pro, "fina_indicator", fields, start_date, end_date, log=log)
     df = normalize_fina_indicator(raw, source_label)
     affected = upsert_fina_indicator(engine, df)
     loaded_periods = sorted({dt.strftime("%Y%m%d") for dt in df["end_date"].dropna().tolist()}) if not df.empty else []
@@ -1074,14 +1144,14 @@ def normalize_cashflow(raw: pd.DataFrame, source_label: str) -> pd.DataFrame:
     return out[CASHFLOW_COLS].copy()
 
 
-def load_cashflow_tushare(engine, start_date: date, end_date: date, source_label: str, token: str, log=None, by_ann_date: bool = False):
+def load_cashflow_tushare(engine, start_date: date, end_date: date, source_label: str, token: str, log=None, by_symbol: bool = False):
     pro = ts.pro_api(token)
     fields = (
         "ts_code,ann_date,f_ann_date,end_date,report_type,comp_type,end_type,"
         "n_cashflow_act,n_cash_flows_inv_act,n_cash_flows_fnc_act"
     )
-    if by_ann_date:
-        raw = _fetch_financial_by_ann_date(pro, "cashflow", fields, start_date, end_date, log=log)
+    if by_symbol:
+        raw = _fetch_financial_by_symbol(engine, pro, "cashflow", fields, start_date, end_date, log=log)
     else:
         raw = _fetch_financial_by_disclosure_dates(engine, pro, "cashflow", fields, start_date, end_date, log=log)
     df = normalize_cashflow(raw, source_label)
@@ -1108,6 +1178,20 @@ def load_monthly_basic_akshare(engine, end_date: date, source_label: str, max_wo
 def _get_symbol_universe(engine) -> List[str]:
     with engine.connect() as conn:
         rows = conn.execute(text("SELECT DISTINCT symbol FROM cn_stock_daily_price WHERE symbol IS NOT NULL AND symbol <> '' ORDER BY symbol")).fetchall()
+    return [str(row[0]).strip() for row in rows if str(row[0]).strip()]
+
+
+def _get_universe_symbols_from_price(engine, start_date: date, end_date: date) -> List[str]:
+    """All symbols with price data in [start_date, end_date] — includes delisted stocks."""
+    sql = text("""
+        SELECT DISTINCT symbol
+        FROM cn_stock_daily_price
+        WHERE trade_date BETWEEN :s AND :e
+          AND symbol IS NOT NULL AND symbol <> ''
+        ORDER BY symbol
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"s": start_date, "e": end_date}).fetchall()
     return [str(row[0]).strip() for row in rows if str(row[0]).strip()]
 
 
@@ -1236,8 +1320,8 @@ def main() -> None:
     parser.add_argument("--balance-source-label", default="tushare_balancesheet")
     parser.add_argument("--fina-source-label", default="tushare_fina_indicator")
     parser.add_argument("--cashflow-source-label", default="tushare_cashflow")
-    parser.add_argument("--cashflow-by-ann-date", action="store_true",
-                        help="Backfill cashflow by scanning each ann_date instead of using cn_event_disclosure_date (use for historical backfill)")
+    parser.add_argument("--by-symbol", action="store_true",
+                        help="Historical backfill mode: iterate over all symbols in cn_stock_daily_price (includes delisted) instead of disclosure-date driven fetch. Use for date ranges where cn_event_disclosure_date is empty.")
     parser.add_argument("--akshare-workers", type=int, default=8)
     args = parser.parse_args()
 
@@ -1302,6 +1386,7 @@ def main() -> None:
                 end_date=end_date,
                 source_label=args.income_source_label,
                 token=token,
+                by_symbol=args.by_symbol,
             )
             balance_rows, balance_affected, balance_periods, _ = load_balancesheet_tushare(
                 engine=engine,
@@ -1309,6 +1394,7 @@ def main() -> None:
                 end_date=end_date,
                 source_label=args.balance_source_label,
                 token=token,
+                by_symbol=args.by_symbol,
             )
             fina_rows, fina_affected, fina_periods, _ = load_fina_indicator_tushare(
                 engine=engine,
@@ -1316,6 +1402,7 @@ def main() -> None:
                 end_date=end_date,
                 source_label=args.fina_source_label,
                 token=token,
+                by_symbol=args.by_symbol,
             )
             cashflow_rows, cashflow_affected, cashflow_periods, _ = load_cashflow_tushare(
                 engine=engine,
@@ -1323,6 +1410,7 @@ def main() -> None:
                 end_date=end_date,
                 source_label=args.cashflow_source_label,
                 token=token,
+                by_symbol=args.by_symbol,
             )
     except Exception as e:
         if args.provider != "auto":
@@ -1342,6 +1430,7 @@ def main() -> None:
             end_date=end_date,
             source_label=args.income_source_label,
             token=token,
+            by_symbol=args.by_symbol,
         )
         balance_rows, balance_affected, balance_periods, _ = load_balancesheet_tushare(
             engine=engine,
@@ -1349,6 +1438,7 @@ def main() -> None:
             end_date=end_date,
             source_label=args.balance_source_label,
             token=token,
+            by_symbol=args.by_symbol,
         )
         fina_rows, fina_affected, fina_periods, _, fina_failures = load_fina_indicator_akshare(
             engine=engine,
@@ -1364,6 +1454,7 @@ def main() -> None:
             end_date=end_date,
             source_label=args.cashflow_source_label,
             token=token,
+            by_symbol=args.by_symbol,
         )
 
     basic_range = f"{basic_dates[0]}..{basic_dates[-1]}" if basic_dates else "NA"

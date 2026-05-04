@@ -37,8 +37,8 @@ Optional wrappers:
 
 Optional analytics views:
 
-16. `cn_market.cn_stock_leader_score_v1.sql`
-17. `cn_market.cn_stock_daily_basic.sql`
+16. `cn_market.cn_stock_daily_basic.sql`
+17. `cn_market.cn_stock_leader_score_v1.sql`
 18. `cn_market.cn_stock_leader_score_v2.sql`
 19. `cn_market.cn_stock_monthly_basic.sql`
 20. `cn_market.cn_stock_income.sql`
@@ -46,10 +46,10 @@ Optional analytics views:
 22. `cn_market.cn_stock_fina_indicator.sql`
 23. `cn_market.cn_stock_cashflow.sql`
 24. `cn_market.cn_fundamental_quality_param_t.sql`
-23. `cn_market.cn_stock_fundamental_quality_v1.sql`
-24. `cn_market.cn_stock_fundamental_quality_hist_v1.sql`
-25. `cn_market.cn_stock_fundamental_quality_snap.sql`
-26. `cn_market.cn_stock_financial_event_bridge_v1.sql`
+25. `cn_market.cn_stock_fundamental_quality_v1.sql`
+26. `cn_market.cn_stock_fundamental_quality_hist_v1.sql`
+27. `cn_market.cn_stock_fundamental_quality_snap.sql`
+28. `cn_market.cn_stock_financial_event_bridge_v1.sql`
 
 Validation SPs:
 
@@ -182,7 +182,7 @@ set STOCK_FUNDAMENTAL_MONTHLY_HISTORY_START=20080101
 python runner.py --tasks stock_fundamental --asof 20260407
 ```
 
-What it loads (one pass, Tushare disclosure-date driven):
+What it loads:
 
 - `cn_stock_monthly_basic` — month-end PE_TTM / PB / PS snapshot
 - `cn_stock_income` — quarterly income statement
@@ -194,17 +194,23 @@ What it loads (one pass, Tushare disclosure-date driven):
   - `cn_stock_fundamental_quality_hist_v1`
   - `cn_stock_fundamental_quality_snap` (materialized; adds `roe`, `netprofit_yoy`, `ocf_to_np`)
 
+Fetch modes for quarterly financial tables (income / balancesheet / fina_indicator / cashflow):
+
+- **Default (incremental)** — disclosure-date driven: reads `cn_event_disclosure_date` to know which symbols disclosed on each date, then calls `api(ts_code=..., start_date=..., end_date=...)`. Correct for daily catch-up where the disclosure table is populated.
+- **`--by-symbol` (historical backfill)** — iterates over all symbols in `cn_stock_daily_price` for the requested period (includes delisted stocks), calls `api(ts_code=..., start_date=..., end_date=...)` per symbol. Use when `cn_event_disclosure_date` has no rows for the target period.
+
 Thresholds driven by:
 
 - `cn_fundamental_quality_param_t`
 
-Standalone cashflow backfill flag:
+Standalone historical backfill flag:
 
-- `--cashflow-by-ann-date` — scan every calendar day by `ann_date` instead of using `cn_event_disclosure_date` (required for historical periods where the disclosure table is empty)
+- `--by-symbol` — iterate over every symbol in `cn_stock_daily_price` (includes delisted stocks from the period) and call `api(ts_code=..., start_date=..., end_date=...)` per symbol. This is the correct primary query dimension for quarterly financial APIs. Use for any historical period where `cn_event_disclosure_date` is empty. Applies to all four tables: income, balancesheet, fina\_indicator, cashflow.
 
-Env controls for cashflow:
+Env controls:
 
 - `STOCK_FUNDAMENTAL_MONTHLY_CASHFLOW_SOURCE_LABEL` (default: `tushare_cashflow`)
+- `STOCK_FUNDAMENTAL_MONTHLY_BY_SYMBOL` (default: `0`) — set to `1` to use symbol-based fetch (historical backfill mode) in runner task
 
 ## SW Industry Daily Task
 
@@ -266,30 +272,31 @@ python -m app.tools.sync_cn_sw_industry_daily_from_tushare `
   --full
 ```
 
-### Step 3 — Quarterly financials (income / balancesheet / fina\_indicator / monthly\_basic)
+### Step 3 — Quarterly financials + cashflow (all four tables, symbol-based)
 
-```powershell
-$env:STOCK_FUNDAMENTAL_MONTHLY_FORCE = "1"
-$env:STOCK_FUNDAMENTAL_MONTHLY_HISTORY_START = "20100101"
-python runner.py --flag tu --tasks stock_fundamental --asof 20260430
-```
-
-### Step 4 — `cn_stock_cashflow` historical backfill
-
-Must use `--cashflow-by-ann-date` because `cn_event_disclosure_date` has no historical rows.
-This step only loads cashflow; it does not re-run income/fina_indicator.
+`--by-symbol` iterates over all symbols in `cn_stock_daily_price` for the period — this includes
+stocks that have since been delisted, which a current-universe query would miss.
+It calls `api(ts_code=..., start_date=..., end_date=...)` per symbol, which is the primary query
+dimension for income / balancesheet / fina_indicator / cashflow APIs.
 
 ```powershell
 python -m app.tools.sync_cn_stock_fundamental_monthly `
   --provider tushare `
   --start 2010-01-01 `
   --end 2026-04-30 `
-  --cashflow-by-ann-date
+  --by-symbol
 ```
 
-### Step 5 — Rebuild quality snapshot (after cashflow is loaded)
+Or via runner (uses `STOCK_FUNDAMENTAL_MONTHLY_BY_SYMBOL` env var):
 
-Re-runs stock_fundamental so `ocf_to_np` is written into `cn_stock_fundamental_quality_snap`.
+```powershell
+$env:STOCK_FUNDAMENTAL_MONTHLY_FORCE = "1"
+$env:STOCK_FUNDAMENTAL_MONTHLY_HISTORY_START = "20100101"
+$env:STOCK_FUNDAMENTAL_MONTHLY_BY_SYMBOL = "1"
+python runner.py --flag tu --tasks stock_fundamental --asof 20260430
+```
+
+### Step 4 — Rebuild quality snapshot
 
 ```powershell
 $env:STOCK_FUNDAMENTAL_MONTHLY_FORCE = "1"
@@ -331,5 +338,3 @@ FROM cn_stock_fundamental_quality_snap;
 - `Dump_c_market_20260305.sql` is a full dump artifact, not part of the
   incremental apply order above.
 - Leader-score queries should use the latest available industry-mapping date.
-- At current implementation time, `cn_stock_daily_basic` has been loaded for
-  `2026-01-09` to `2026-02-27`.
