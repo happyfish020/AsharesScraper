@@ -14,6 +14,7 @@ from app.tools.sync_cn_stock_fundamental_monthly import (
     apply_ddl,
     ensure_tables,
     load_balancesheet_tushare,
+    load_cashflow_tushare,
     load_income_tushare,
     load_fina_indicator_akshare,
     load_fina_indicator_tushare,
@@ -70,6 +71,7 @@ class StockFundamentalMonthlyTask:
         income_source_label = str(os.getenv("STOCK_FUNDAMENTAL_MONTHLY_INCOME_SOURCE_LABEL", "tushare_income")).strip() or "tushare_income"
         balance_source_label = str(os.getenv("STOCK_FUNDAMENTAL_MONTHLY_BALANCE_SOURCE_LABEL", "tushare_balancesheet")).strip() or "tushare_balancesheet"
         fina_source_label = str(os.getenv("STOCK_FUNDAMENTAL_MONTHLY_FINA_SOURCE_LABEL", "tushare_fina_indicator")).strip() or "tushare_fina_indicator"
+        cashflow_source_label = str(os.getenv("STOCK_FUNDAMENTAL_MONTHLY_CASHFLOW_SOURCE_LABEL", "tushare_cashflow")).strip() or "tushare_cashflow"
         akshare_workers = max(1, int(os.getenv("STOCK_FUNDAMENTAL_MONTHLY_AKSHARE_WORKERS", "8")))
         akshare_timeout = float(os.getenv("STOCK_FUNDAMENTAL_MONTHLY_AKSHARE_TIMEOUT", "15"))
         skip_quality_snapshot = str(os.getenv("STOCK_FUNDAMENTAL_MONTHLY_SKIP_QUALITY_SNAPSHOT", "0")).strip().lower() in {"1", "true", "yes", "on"}
@@ -162,11 +164,13 @@ class StockFundamentalMonthlyTask:
             fina_start,
         )
 
-        basic_rows = basic_affected = income_rows = income_affected = balance_rows = balance_affected = fina_rows = fina_affected = 0
+        basic_rows = basic_affected = income_rows = income_affected = balance_rows = balance_affected = 0
+        fina_rows = fina_affected = cashflow_rows = cashflow_affected = 0
         basic_dates = []
         income_periods = []
         balance_periods = []
         fina_periods = []
+        cashflow_periods = []
         used_provider = provider
         ak_failures = 0
 
@@ -244,6 +248,21 @@ class StockFundamentalMonthlyTask:
                     log=ctx.log,
                 )
 
+        if run_quarterly_financials and fina_start <= end_date:
+            if provider == "akshare":
+                ctx.log.info("[stock_fundamental_monthly] cashflow skipped: akshare provider has no cashflow fallback")
+            else:
+                if not token:
+                    raise RuntimeError("tushare token missing")
+                cashflow_rows, cashflow_affected, cashflow_periods, _ = load_cashflow_tushare(
+                    engine=ctx.engine,
+                    start_date=fina_start,
+                    end_date=end_date,
+                    source_label=cashflow_source_label,
+                    token=token,
+                    log=ctx.log,
+                )
+
         apply_ddl(ctx.engine, "docs/DDL/cn_market.cn_stock_fundamental_quality_v1.sql")
         apply_ddl(ctx.engine, "docs/DDL/cn_market.cn_stock_fundamental_quality_hist_v1.sql")
         snap_rows = -1
@@ -257,7 +276,8 @@ class StockFundamentalMonthlyTask:
             "[stock_fundamental_monthly] done provider=%s basic_start=%s basic_end=%s basic_dates=%s basic_rows=%s basic_affected=%s "
             "income_start=%s income_end=%s income_periods=%s income_rows=%s income_affected=%s "
             "balance_start=%s balance_end=%s balance_periods=%s balance_rows=%s balance_affected=%s "
-            "fina_start=%s fina_end=%s fina_periods=%s fina_rows=%s fina_affected=%s ak_failures=%s "
+            "fina_start=%s fina_end=%s fina_periods=%s fina_rows=%s fina_affected=%s "
+            "cashflow_periods=%s cashflow_rows=%s cashflow_affected=%s ak_failures=%s "
             "full_rebuild=%s skip_quality_snapshot=%s views_applied=3 snap_rows=%s",
             used_provider,
             basic_start,
@@ -280,6 +300,9 @@ class StockFundamentalMonthlyTask:
             len(fina_periods),
             fina_rows,
             fina_affected,
+            len(cashflow_periods),
+            cashflow_rows,
+            cashflow_affected,
             ak_failures,
             full_rebuild,
             skip_quality_snapshot,

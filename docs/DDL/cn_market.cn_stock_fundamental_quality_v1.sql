@@ -25,6 +25,28 @@ latest_fina AS (
         ) AS rn
     FROM cn_stock_fina_indicator f
 ),
+latest_cashflow AS (
+    SELECT
+        cf.symbol,
+        cf.end_date,
+        cf.n_cashflow_act,
+        ROW_NUMBER() OVER (
+            PARTITION BY cf.symbol
+            ORDER BY cf.end_date DESC, COALESCE(cf.ann_date, cf.end_date) DESC
+        ) AS rn
+    FROM cn_stock_cashflow cf
+),
+latest_income AS (
+    SELECT
+        ic.symbol,
+        ic.end_date,
+        ic.n_income_attr_p,
+        ROW_NUMBER() OVER (
+            PARTITION BY ic.symbol
+            ORDER BY ic.end_date DESC, COALESCE(ic.ann_date, ic.end_date) DESC
+        ) AS rn
+    FROM cn_stock_income ic
+),
 latest_basic AS (
     SELECT
         b.*,
@@ -56,6 +78,13 @@ SELECT
     f.debt_to_eqt,
     f.grossprofit_margin,
     f.netprofit_margin,
+    f.roe,
+    f.netprofit_yoy,
+    CASE
+        WHEN ic.n_income_attr_p IS NOT NULL AND ic.n_income_attr_p <> 0
+        THEN cf.n_cashflow_act / ic.n_income_attr_p
+        ELSE NULL
+    END AS ocf_to_np,
     prm.eps_min,
     prm.revenue_growth_min,
     prm.revenue_growth_strict_min,
@@ -102,4 +131,12 @@ JOIN params prm
 LEFT JOIN latest_basic b
   ON b.symbol = f.symbol
  AND b.rn = 1
+LEFT JOIN latest_cashflow cf
+  ON cf.symbol = f.symbol
+ AND cf.end_date = f.end_date
+ AND cf.rn = 1
+LEFT JOIN latest_income ic
+  ON ic.symbol = f.symbol
+ AND ic.end_date = f.end_date
+ AND ic.rn = 1
 WHERE f.rn = 1;

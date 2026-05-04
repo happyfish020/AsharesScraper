@@ -8,9 +8,10 @@ set "WORKDIR=D:\LHJ\PythonWS\MarketScraper\AsharesScraperV2"
 
 cd /d "%WORKDIR%"
 
-REM Weekly maintenance / slow-changing metadata only.
-echo [WEEKLY] board + stock_basic
-"%PYTHON_EXE%" "%RUNNER_PY%" --flag tu --tasks board,stock_basic --asof latest
+REM Weekly: board membership refresh (industry/concept mapping changes infrequently).
+REM stock_basic and sw_industry are now in daily.bat.
+echo [WEEKLY] board membership refresh
+"%PYTHON_EXE%" "%RUNNER_PY%" --flag tu --tasks board --asof latest
 if errorlevel 1 goto :fail
 
 echo [WEEKLY] done

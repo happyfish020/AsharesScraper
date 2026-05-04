@@ -130,6 +130,21 @@ FINA_COLS = [
     "raw_payload",
 ]
 
+CASHFLOW_COLS = [
+    "symbol",
+    "end_date",
+    "ann_date",
+    "f_ann_date",
+    "report_type",
+    "comp_type",
+    "end_type",
+    "n_cashflow_act",
+    "n_cash_flows_inv_act",
+    "n_cash_flows_fnc_act",
+    "source",
+    "raw_payload",
+]
+
 
 def ensure_tables(engine) -> None:
     for ddl_path in [
@@ -137,6 +152,7 @@ def ensure_tables(engine) -> None:
         "docs/DDL/cn_market.cn_stock_income.sql",
         "docs/DDL/cn_market.cn_stock_balancesheet.sql",
         "docs/DDL/cn_market.cn_stock_fina_indicator.sql",
+        "docs/DDL/cn_market.cn_stock_cashflow.sql",
         "docs/DDL/cn_market.cn_fundamental_quality_param_t.sql",
         "docs/DDL/cn_market.cn_stock_fundamental_quality_snap.sql",
     ]:
@@ -145,6 +161,9 @@ def ensure_tables(engine) -> None:
     _ensure_mysql_column(engine, "cn_stock_fina_indicator", "arturn_days", "DECIMAL(18,6) NULL AFTER ar_turn")
     _ensure_mysql_column(engine, "cn_stock_fina_indicator", "inv_turn", "DECIMAL(18,6) NULL AFTER arturn_days")
     _ensure_mysql_column(engine, "cn_stock_fina_indicator", "invturn_days", "DECIMAL(18,6) NULL AFTER inv_turn")
+    _ensure_mysql_column(engine, "cn_stock_fundamental_quality_snap", "roe", "DECIMAL(18,6) NULL AFTER netprofit_margin")
+    _ensure_mysql_column(engine, "cn_stock_fundamental_quality_snap", "netprofit_yoy", "DOUBLE NULL AFTER roe")
+    _ensure_mysql_column(engine, "cn_stock_fundamental_quality_snap", "ocf_to_np", "DECIMAL(18,6) NULL AFTER netprofit_yoy")
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE cn_stock_fina_indicator MODIFY COLUMN or_yoy DOUBLE NULL"))
         conn.execute(text("ALTER TABLE cn_stock_fina_indicator MODIFY COLUMN netprofit_yoy DOUBLE NULL"))
@@ -194,6 +213,7 @@ def rebuild_quality_snapshot(engine, *, log=None, include_payload: bool = False)
             total_mv, circ_mv, pe, pe_ttm, pb, ps, ps_ttm,
             eps, revenue_growth_pct, or_yoy, tr_yoy, q_sales_yoy,
             debt_to_eqt, grossprofit_margin, netprofit_margin,
+            roe, netprofit_yoy, ocf_to_np,
             pass_eps_positive, pass_revenue_growth_5, pass_revenue_growth_10,
             pass_debt_to_eqt_lt_2, pass_gross_margin_positive,
             quality_core_score, quality_total_score, quality_pass_core, quality_pass_with_margin,
@@ -240,6 +260,10 @@ def rebuild_quality_snapshot(engine, *, log=None, include_payload: bool = False)
                   f.debt_to_eqt,
                   f.grossprofit_margin,
                   f.netprofit_margin,
+                  f.roe,
+                  f.netprofit_yoy,
+                  cf.n_cashflow_act,
+                  ic.n_income_attr_p,
                   f.source AS fina_source,
                   ROW_NUMBER() OVER (
                       PARTITION BY b.symbol, b.trade_date
@@ -254,6 +278,10 @@ def rebuild_quality_snapshot(engine, *, log=None, include_payload: bool = False)
             FROM basic_base b
             LEFT JOIN cn_stock_fina_indicator f
               ON f.symbol = b.symbol
+            LEFT JOIN cn_stock_cashflow cf
+              ON cf.symbol = b.symbol AND cf.end_date = f.end_date
+            LEFT JOIN cn_stock_income ic
+              ON ic.symbol = b.symbol AND ic.end_date = f.end_date
         )
         SELECT
             j.symbol,
@@ -276,6 +304,13 @@ def rebuild_quality_snapshot(engine, *, log=None, include_payload: bool = False)
             j.debt_to_eqt,
             j.grossprofit_margin,
             j.netprofit_margin,
+            j.roe,
+            j.netprofit_yoy,
+            CASE
+                WHEN j.n_income_attr_p IS NOT NULL AND j.n_income_attr_p <> 0
+                THEN j.n_cashflow_act / j.n_income_attr_p
+                ELSE NULL
+            END AS ocf_to_np,
             CASE WHEN j.eps > prm.eps_min THEN 1 ELSE 0 END AS pass_eps_positive,
             CASE WHEN COALESCE(j.or_yoy, j.tr_yoy, j.q_sales_yoy) >= prm.revenue_growth_min THEN 1 ELSE 0 END AS pass_revenue_growth_5,
             CASE WHEN COALESCE(j.or_yoy, j.tr_yoy, j.q_sales_yoy) >= prm.revenue_growth_strict_min THEN 1 ELSE 0 END AS pass_revenue_growth_10,
@@ -989,6 +1024,72 @@ def load_fina_indicator_tushare(engine, start_date: date, end_date: date, source
     loaded_periods = sorted({dt.strftime("%Y%m%d") for dt in df["end_date"].dropna().tolist()}) if not df.empty else []
     return int(len(df)), int(affected), loaded_periods, "tushare"
 
+def upsert_cashflow(engine, df: pd.DataFrame, chunk_size: int = 4000) -> int:
+    if df is None or df.empty:
+        return 0
+    work = df.copy().astype(object).where(pd.notna(df), None)
+    insert_sql = """
+        INSERT INTO cn_stock_cashflow (
+            symbol, end_date, ann_date, f_ann_date, report_type, comp_type, end_type,
+            n_cashflow_act, n_cash_flows_inv_act, n_cash_flows_fnc_act, source, raw_payload
+        ) VALUES (
+            :symbol, :end_date, :ann_date, :f_ann_date, :report_type, :comp_type, :end_type,
+            :n_cashflow_act, :n_cash_flows_inv_act, :n_cash_flows_fnc_act, :source, :raw_payload
+        )
+        ON DUPLICATE KEY UPDATE
+            ann_date = VALUES(ann_date),
+            f_ann_date = VALUES(f_ann_date),
+            report_type = VALUES(report_type),
+            comp_type = VALUES(comp_type),
+            end_type = VALUES(end_type),
+            n_cashflow_act = VALUES(n_cashflow_act),
+            n_cash_flows_inv_act = VALUES(n_cash_flows_inv_act),
+            n_cash_flows_fnc_act = VALUES(n_cash_flows_fnc_act),
+            source = VALUES(source),
+            raw_payload = VALUES(raw_payload)
+    """
+    affected = 0
+    with engine.begin() as conn:
+        for batch in chunked(work[CASHFLOW_COLS].to_dict(orient="records"), chunk_size):
+            ret = conn.execute(text(insert_sql), batch)
+            affected += int(ret.rowcount or 0)
+    return affected
+
+
+def normalize_cashflow(raw: pd.DataFrame, source_label: str) -> pd.DataFrame:
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=CASHFLOW_COLS)
+    out = raw.copy()
+    out["symbol"] = out.get("ts_code", pd.Series(dtype="object")).astype(str).str.split(".").str[0]
+    for date_col in ["end_date", "ann_date", "f_ann_date"]:
+        out[date_col] = pd.to_datetime(out.get(date_col), format="%Y%m%d", errors="coerce").dt.date
+    for col in ["n_cashflow_act", "n_cash_flows_inv_act", "n_cash_flows_fnc_act"]:
+        out[col] = pd.to_numeric(out[col], errors="coerce") if col in out.columns else None
+    out["source"] = source_label
+    out["raw_payload"] = _frame_row_payloads(raw)
+    out = out.dropna(subset=["symbol", "end_date"])
+    for col in CASHFLOW_COLS:
+        if col not in out.columns:
+            out[col] = None
+    return out[CASHFLOW_COLS].copy()
+
+
+def load_cashflow_tushare(engine, start_date: date, end_date: date, source_label: str, token: str, log=None, by_ann_date: bool = False):
+    pro = ts.pro_api(token)
+    fields = (
+        "ts_code,ann_date,f_ann_date,end_date,report_type,comp_type,end_type,"
+        "n_cashflow_act,n_cash_flows_inv_act,n_cash_flows_fnc_act"
+    )
+    if by_ann_date:
+        raw = _fetch_financial_by_ann_date(pro, "cashflow", fields, start_date, end_date, log=log)
+    else:
+        raw = _fetch_financial_by_disclosure_dates(engine, pro, "cashflow", fields, start_date, end_date, log=log)
+    df = normalize_cashflow(raw, source_label)
+    affected = upsert_cashflow(engine, df)
+    loaded_periods = sorted({dt.strftime("%Y%m%d") for dt in df["end_date"].dropna().tolist()}) if not df.empty else []
+    return int(len(df)), int(affected), loaded_periods, "tushare"
+
+
 def load_monthly_basic_akshare(engine, end_date: date, source_label: str, max_workers: int = 12, timeout: float = 15.0):
     df, failures = fetch_daily_basic_akshare_snapshot(
         trade_date=end_date,
@@ -1134,6 +1235,9 @@ def main() -> None:
     parser.add_argument("--income-source-label", default="tushare_income")
     parser.add_argument("--balance-source-label", default="tushare_balancesheet")
     parser.add_argument("--fina-source-label", default="tushare_fina_indicator")
+    parser.add_argument("--cashflow-source-label", default="tushare_cashflow")
+    parser.add_argument("--cashflow-by-ann-date", action="store_true",
+                        help="Backfill cashflow by scanning each ann_date instead of using cn_event_disclosure_date (use for historical backfill)")
     parser.add_argument("--akshare-workers", type=int, default=8)
     args = parser.parse_args()
 
@@ -1155,11 +1259,13 @@ def main() -> None:
 
     engine = build_engine()
     ensure_tables(engine)
-    basic_rows = basic_affected = income_rows = income_affected = balance_rows = balance_affected = fina_rows = fina_affected = 0
+    basic_rows = basic_affected = income_rows = income_affected = balance_rows = balance_affected = 0
+    fina_rows = fina_affected = cashflow_rows = cashflow_affected = 0
     basic_dates: List[date] = []
     income_periods: List[str] = []
     balance_periods: List[str] = []
     fina_periods: List[str] = []
+    cashflow_periods: List[str] = []
     used_provider = args.provider
     ak_failures = 0
 
@@ -1211,6 +1317,13 @@ def main() -> None:
                 source_label=args.fina_source_label,
                 token=token,
             )
+            cashflow_rows, cashflow_affected, cashflow_periods, _ = load_cashflow_tushare(
+                engine=engine,
+                start_date=start_date,
+                end_date=end_date,
+                source_label=args.cashflow_source_label,
+                token=token,
+            )
     except Exception as e:
         if args.provider != "auto":
             raise
@@ -1245,11 +1358,19 @@ def main() -> None:
             max_workers=args.akshare_workers,
         )
         ak_failures += fina_failures
+        cashflow_rows, cashflow_affected, cashflow_periods, _ = load_cashflow_tushare(
+            engine=engine,
+            start_date=start_date,
+            end_date=end_date,
+            source_label=args.cashflow_source_label,
+            token=token,
+        )
 
     basic_range = f"{basic_dates[0]}..{basic_dates[-1]}" if basic_dates else "NA"
     income_range = f"{income_periods[0]}..{income_periods[-1]}" if income_periods else "NA"
     balance_range = f"{balance_periods[0]}..{balance_periods[-1]}" if balance_periods else "NA"
     fina_range = f"{fina_periods[0]}..{fina_periods[-1]}" if fina_periods else "NA"
+    cashflow_range = f"{cashflow_periods[0]}..{cashflow_periods[-1]}" if cashflow_periods else "NA"
     apply_ddl(engine, "docs/DDL/cn_market.cn_stock_fundamental_quality_v1.sql")
     apply_ddl(engine, "docs/DDL/cn_market.cn_stock_fundamental_quality_hist_v1.sql")
     apply_ddl(engine, "docs/DDL/cn_market.cn_stock_working_capital_alert_v1.sql")
@@ -1260,6 +1381,7 @@ def main() -> None:
         f"income_periods={len(income_periods)} income_range={income_range} income_rows={income_rows} income_affected={income_affected} "
         f"balance_periods={len(balance_periods)} balance_range={balance_range} balance_rows={balance_rows} balance_affected={balance_affected} "
         f"fina_periods={len(fina_periods)} fina_range={fina_range} fina_rows={fina_rows} fina_affected={fina_affected} "
+        f"cashflow_periods={len(cashflow_periods)} cashflow_range={cashflow_range} cashflow_rows={cashflow_rows} cashflow_affected={cashflow_affected} "
         f"ak_failures={ak_failures} views_applied=cn_stock_fundamental_quality_v1,cn_stock_fundamental_quality_hist_v1,cn_stock_working_capital_alert_v1 "
         f"snap_rows={snap_rows}"
     )

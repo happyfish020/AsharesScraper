@@ -80,6 +80,7 @@ SELECT
     r.ma20,
     r.ma60,
     r.rs_20d,
+    r.rs_20d AS industry_return,
     r.rs_20d_percentile,
     r.pct_change_percentile,
     r.rs_rank,
@@ -87,7 +88,12 @@ SELECT
         WHEN r.close > r.ma20 AND r.ma20 > r.ma60 THEN 'UPTREND'
         WHEN r.close > r.ma20 THEN 'ABOVE_MA20'
         ELSE 'WEAK'
-    END AS trend_state
+    END AS trend_state,
+    CASE
+        WHEN r.close > r.ma20 AND r.ma20 > r.ma60 THEN 'UPTREND'
+        WHEN r.close > r.ma20 THEN 'ABOVE_MA20'
+        ELSE 'WEAK'
+    END AS industry_strength
 FROM ranked r
 WHERE r.trade_date = (
     SELECT MAX(x.trade_date)

@@ -33,6 +33,7 @@ from app.tasks.stock_quality_snapshot_task import StockQualitySnapshotTask
 from app.tasks.stock_working_capital_alert_task import StockWorkingCapitalAlertTask
 from app.tasks.inst_fund_hold_summary_task import InstFundHoldSummaryTask
 from app.tasks.event_loader_task import EventLoaderTask
+from app.tasks.sw_industry_daily_task import SwIndustryDailyTask
 
 
 def _parse_args(argv: Optional[List[str]] = None):
@@ -40,7 +41,7 @@ def _parse_args(argv: Optional[List[str]] = None):
     p.add_argument("--asof", default="latest", help="run as-of trading day: latest or YYYYMMDD")
     p.add_argument("--days", type=int, default=1, help="lookback window days (used when --asof=latest and you want backfill)")
     p.add_argument("--flag", default="tu", choices=["tu", "ak"], help="data source flag: tu=tushare (default), ak=akshare")
-    p.add_argument("--tasks", default="stock", help="comma-separated: stock,his_stocks,board,stock_basic,stock_fundamental,stock_quality_snapshot,stock_working_capital,inst_fund_hold,rotation,etf,index,futures,options,event,event_daily,event_periodic,audit,all")
+    p.add_argument("--tasks", default="stock", help="comma-separated: stock,his_stocks,board,stock_basic,sw_industry,stock_fundamental,stock_quality_snapshot,stock_working_capital,inst_fund_hold,rotation,etf,index,futures,options,event,event_daily,event_periodic,audit,all")
     p.add_argument("--history-start", default="20000101", help="his_stocks only: YYYYMMDD or YYYY-MM")
     p.add_argument("--history-end", default="latest", help="his_stocks only: latest or YYYYMMDD or YYYY-MM")
     p.add_argument("--history-source-order", default="ak,yf", help="his_stocks only: comma-separated source priority, default ak,yf")
@@ -119,7 +120,7 @@ def run(argv: Optional[List[str]] = None) -> None:
     raw = (args.tasks or "stock").strip().lower()
     selected = []
     if raw in ("all", "*"):
-        selected = ["stock", "board", "stock_basic", "stock_fundamental", "inst_fund_hold", "rotation", "etf", "index", "futures", "options", "event_daily", "event_periodic", "audit"]
+        selected = ["stock", "board", "stock_basic", "sw_industry", "stock_fundamental", "inst_fund_hold", "rotation", "etf", "index", "futures", "options", "event_daily", "event_periodic", "audit"]
     else:
         selected = [t.strip() for t in raw.split(",") if t.strip()]
 
@@ -181,6 +182,7 @@ def run(argv: Optional[List[str]] = None) -> None:
         "his_stocks": HisStocksLoaderTask,
         "board": BoardMembershipRefreshTask,
         "stock_basic": StockBasicWeeklyTask,
+        "sw_industry": SwIndustryDailyTask,
         "stock_fundamental": StockFundamentalMonthlyTask,
         "stock_quality_snapshot": StockQualitySnapshotTask,
         "stock_working_capital": StockWorkingCapitalAlertTask,
@@ -213,7 +215,7 @@ def run(argv: Optional[List[str]] = None) -> None:
     ctx = RunContext(config=cfg, engine=engine, log=log)
 
     # Preserve a stable execution order + rotation
-    order = ["his_stocks", "stock", "board", "stock_basic", "stock_fundamental", "stock_quality_snapshot", "stock_working_capital", "inst_fund_hold", "rotation", "event", "event_daily", "event_periodic", "etf", "index", "futures", "options", "audit"]
+    order = ["his_stocks", "stock", "board", "stock_basic", "sw_industry", "stock_fundamental", "stock_quality_snapshot", "stock_working_capital", "inst_fund_hold", "rotation", "event", "event_daily", "event_periodic", "etf", "index", "futures", "options", "audit"]
     for name in order:
         if name in selected:
             tasks.append(tasks_map[name]())

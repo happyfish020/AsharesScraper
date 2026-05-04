@@ -44,6 +44,10 @@ joined AS (
         f.debt_to_eqt,
         f.grossprofit_margin,
         f.netprofit_margin,
+        f.roe,
+        f.netprofit_yoy,
+        cf.n_cashflow_act,
+        ic.n_income_attr_p,
         f.source AS fina_source,
         f.raw_payload AS fina_raw_payload,
         ROW_NUMBER() OVER (
@@ -59,6 +63,10 @@ joined AS (
     FROM basic_base b
     LEFT JOIN cn_stock_fina_indicator f
       ON f.symbol = b.symbol
+    LEFT JOIN cn_stock_cashflow cf
+      ON cf.symbol = b.symbol AND cf.end_date = f.end_date
+    LEFT JOIN cn_stock_income ic
+      ON ic.symbol = b.symbol AND ic.end_date = f.end_date
 )
 SELECT
     prm.parameter_set,
@@ -82,6 +90,13 @@ SELECT
     j.debt_to_eqt,
     j.grossprofit_margin,
     j.netprofit_margin,
+    j.roe,
+    j.netprofit_yoy,
+    CASE
+        WHEN j.n_income_attr_p IS NOT NULL AND j.n_income_attr_p <> 0
+        THEN j.n_cashflow_act / j.n_income_attr_p
+        ELSE NULL
+    END AS ocf_to_np,
     prm.eps_min,
     prm.revenue_growth_min,
     prm.revenue_growth_strict_min,

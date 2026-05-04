@@ -42,8 +42,10 @@ Optional analytics views:
 18. `cn_market.cn_stock_leader_score_v2.sql`
 19. `cn_market.cn_stock_monthly_basic.sql`
 20. `cn_market.cn_stock_income.sql`
-21. `cn_market.cn_stock_fina_indicator.sql`
-22. `cn_market.cn_fundamental_quality_param_t.sql`
+21. `cn_market.cn_stock_balancesheet.sql`
+22. `cn_market.cn_stock_fina_indicator.sql`
+23. `cn_market.cn_stock_cashflow.sql`
+24. `cn_market.cn_fundamental_quality_param_t.sql`
 23. `cn_market.cn_stock_fundamental_quality_v1.sql`
 24. `cn_market.cn_stock_fundamental_quality_hist_v1.sql`
 25. `cn_market.cn_stock_fundamental_quality_snap.sql`
@@ -83,7 +85,9 @@ SOURCE docs/DDL/cn_market.cn_stock_leader_score_v1.sql;
 SOURCE docs/DDL/cn_market.cn_stock_leader_score_v2.sql;
 SOURCE docs/DDL/cn_market.cn_stock_monthly_basic.sql;
 SOURCE docs/DDL/cn_market.cn_stock_income.sql;
+SOURCE docs/DDL/cn_market.cn_stock_balancesheet.sql;
 SOURCE docs/DDL/cn_market.cn_stock_fina_indicator.sql;
+SOURCE docs/DDL/cn_market.cn_stock_cashflow.sql;
 SOURCE docs/DDL/cn_market.cn_fundamental_quality_param_t.sql;
 SOURCE docs/DDL/cn_market.cn_stock_fundamental_quality_v1.sql;
 SOURCE docs/DDL/cn_market.cn_stock_fundamental_quality_hist_v1.sql;
@@ -157,6 +161,17 @@ Compatibility:
 
 - legacy `STOCK_BASIC_WEEKLY_*` env vars are still accepted
 
+## Data Refresh Schedule
+
+| 频率 | batch file | runner tasks | 数据表 |
+|------|-----------|-------------|-------|
+| 日 | `daily.bat` | `stock,rotation` | `cn_stock_daily_price`, rotation tables |
+| 日 | `daily.bat` | `stock_basic` | `cn_stock_daily_basic` → PE_TTM / PB / PS |
+| 日 | `daily.bat` | `sw_industry` | `cn_sw_industry_daily` → industry_return / industry_strength |
+| 日 | `daily.bat` | `index,event` | `cn_index_daily_price`, event tables |
+| 周 | `weekly.bat` | `board` | `cn_board_member_map_d` (板块成分) |
+| 月 | `monthly.bat` | `stock_fundamental` | `cn_stock_monthly_basic`, `cn_stock_income`, `cn_stock_balancesheet`, `cn_stock_fina_indicator`, `cn_stock_cashflow` |
+
 ## Monthly Fundamental Task
 
 Run monthly fundamentals (historical backfill from 2008):
@@ -167,19 +182,119 @@ set STOCK_FUNDAMENTAL_MONTHLY_HISTORY_START=20080101
 python runner.py --tasks stock_fundamental --asof 20260407
 ```
 
-What it loads:
+What it loads (one pass, Tushare disclosure-date driven):
 
-- `cn_stock_monthly_basic`
-- `cn_stock_income`
-- `cn_stock_fina_indicator`
+- `cn_stock_monthly_basic` — month-end PE_TTM / PB / PS snapshot
+- `cn_stock_income` — quarterly income statement
+- `cn_stock_balancesheet` — quarterly balance sheet
+- `cn_stock_fina_indicator` — ROE / `netprofit_yoy` / `or_yoy` / `ocf_to_or`
+- `cn_stock_cashflow` — `n_cashflow_act` (经营活动现金流净额), used for `ocf_to_np`
 - refreshes:
   - `cn_stock_fundamental_quality_v1`
   - `cn_stock_fundamental_quality_hist_v1`
-  - `cn_stock_fundamental_quality_snap`
+  - `cn_stock_fundamental_quality_snap` (materialized; adds `roe`, `netprofit_yoy`, `ocf_to_np`)
 
-Thresholds are driven by:
+Thresholds driven by:
 
 - `cn_fundamental_quality_param_t`
+
+Standalone cashflow backfill flag:
+
+- `--cashflow-by-ann-date` — scan every calendar day by `ann_date` instead of using `cn_event_disclosure_date` (required for historical periods where the disclosure table is empty)
+
+Env controls for cashflow:
+
+- `STOCK_FUNDAMENTAL_MONTHLY_CASHFLOW_SOURCE_LABEL` (default: `tushare_cashflow`)
+
+## SW Industry Daily Task
+
+Syncs Shenwan L1 industry daily price and valuation. Run daily after stock price data.
+
+```powershell
+python runner.py --flag tu --tasks sw_industry --asof latest
+```
+
+What it loads:
+
+- `cn_sw_industry_daily` — `pct_change`, `close`, `pe`, `pb`, `float_mv`
+
+Views rebuilt on-the-fly (no extra step needed):
+
+- `cn_sw_industry_daily_latest_v`
+- `cn_sw_industry_strength_latest_v` — exposes `industry_return` (= `rs_20d`) and `industry_strength` (= `trend_state`)
+
+Env controls:
+
+- `SW_INDUSTRY_DAILY_ENABLED` (default: `1`)
+- `SW_INDUSTRY_DAILY_LOOKBACK_DAYS` (default: `3`)
+- `SW_INDUSTRY_DAILY_FORCE` (default: `0`)
+- `SW_INDUSTRY_DAILY_SRC` (default: `SW2021`)
+- `SW_INDUSTRY_DAILY_MASTER_SOURCE` (default: `TUSHARE_SW2021_L1`)
+- `SW_INDUSTRY_DAILY_SLEEP` (default: `0.15` s between codes)
+- `SW_INDUSTRY_DAILY_SOURCE_LABEL`
+
+Historical backfill:
+
+```powershell
+set SW_INDUSTRY_DAILY_FORCE=1
+set SW_INDUSTRY_DAILY_LOOKBACK_DAYS=9999
+python runner.py --flag tu --tasks sw_industry --asof 20260430
+```
+
+## Historical Backfill (2010-01-01 → 2026-04-30)
+
+Run in order. Step 1 and Step 2 are independent and can run in parallel terminals.
+
+### Step 1 — `cn_stock_daily_basic` (PE_TTM / PB / PS)
+
+```powershell
+python -m app.tools.sync_cn_stock_daily_basic_from_tushare `
+  --provider tushare `
+  --calendar-source price `
+  --date-order desc `
+  --batch-size 20 `
+  --start 2010-01-01 `
+  --end 2026-04-30
+```
+
+### Step 2 — `cn_sw_industry_daily` (industry\_return / industry\_strength source)
+
+```powershell
+python -m app.tools.sync_cn_sw_industry_daily_from_tushare `
+  --start 2010-01-01 `
+  --end 2026-04-30 `
+  --full
+```
+
+### Step 3 — Quarterly financials (income / balancesheet / fina\_indicator / monthly\_basic)
+
+```powershell
+$env:STOCK_FUNDAMENTAL_MONTHLY_FORCE = "1"
+$env:STOCK_FUNDAMENTAL_MONTHLY_HISTORY_START = "20100101"
+python runner.py --flag tu --tasks stock_fundamental --asof 20260430
+```
+
+### Step 4 — `cn_stock_cashflow` historical backfill
+
+Must use `--cashflow-by-ann-date` because `cn_event_disclosure_date` has no historical rows.
+This step only loads cashflow; it does not re-run income/fina_indicator.
+
+```powershell
+python -m app.tools.sync_cn_stock_fundamental_monthly `
+  --provider tushare `
+  --start 2010-01-01 `
+  --end 2026-04-30 `
+  --cashflow-by-ann-date
+```
+
+### Step 5 — Rebuild quality snapshot (after cashflow is loaded)
+
+Re-runs stock_fundamental so `ocf_to_np` is written into `cn_stock_fundamental_quality_snap`.
+
+```powershell
+$env:STOCK_FUNDAMENTAL_MONTHLY_FORCE = "1"
+python runner.py --flag tu --tasks stock_fundamental --asof 20260430
+```
 
 ## Quick Verification
 
