@@ -2,7 +2,7 @@
 
 This document covers the materialized latest snapshot table for:
 
-- `cn_stock_leader_score_v2`
+- `cn_stock_leader_score_v2` view
 - SW L1 stock mapping
 - `cn_sw_industry_daily`
 
@@ -13,6 +13,11 @@ The table is:
 ## Why This Exists
 
 `cn_stock_leader_score_v2` is a full-history view and is slow for ad-hoc joins.
+
+Local DB note checked on `2026-05-05`:
+
+- `cn_stock_leader_score_v2` is still a view in `cn_market`
+- it is not a physical table
 
 The previously added view:
 
@@ -35,6 +40,11 @@ LEAST(
 ```
 
 This keeps the snapshot aligned with the slowest dependency.
+
+Implementation notes:
+
+- latest safe date now resolves against `cn_board_member_map_d` industry trade dates, not just `valid_from`
+- SW L1 mapping is deduplicated to one `symbol -> sw_l1_id` row per trade date before insert, avoiding duplicate-primary-key failures on overlapping history rows
 
 ## Objects
 
@@ -59,6 +69,12 @@ Build a fixed trade date:
 ```powershell
 python -m app.tools.build_cn_stock_leader_sw_l1_latest_snap --trade-date 2026-02-27
 ```
+
+Current verified latest run on `2026-05-05`:
+
+- `trade_date = 2026-04-30`
+- `row_cnt = 5148`
+- `sw_cnt = 31`
 
 ## Stored Fields
 

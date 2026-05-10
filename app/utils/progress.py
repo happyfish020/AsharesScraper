@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from typing import Callable
 
 
 class ProgressLogger:
@@ -36,7 +35,10 @@ class ProgressLogger:
         if self.log is not None and hasattr(self.log, "info"):
             self.log.info(message)
             return
-        print(message)
+        print(message, flush=True)
+
+    def note(self, message: str, *args) -> None:
+        self._emit(message, *args)
 
     def _format_eta(self) -> str:
         if not self.total or self.completed <= 0 or self.completed >= self.total:

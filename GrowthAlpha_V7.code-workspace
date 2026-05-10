@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../../MarketMon/GrowthAlpha_V7"
+		},
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"python-envs.defaultEnvManager": "ms-python.python:system",
+		"claudeCode.allowDangerouslySkipPermissions": true
+	}
+}

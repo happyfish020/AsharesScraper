@@ -11,6 +11,15 @@ Implemented objects:
 - `cn_stock_leader_score_v2`
 - `app.tools.sync_cn_stock_daily_basic_from_tushare`
 
+Current object type in local `cn_market`:
+
+- `cn_stock_leader_score_v2` is a `VIEW`, not a physical table
+
+Current DB check on `2026-05-05`:
+
+- `cn_stock_leader_score_v2` rows on `2026-04-29`: `0`
+- `cn_stock_leader_score_v2` rows on `2026-04-30`: `0`
+
 Current loaded market-cap coverage:
 
 - `cn_stock_daily_basic`
@@ -32,6 +41,11 @@ Leader ranking currently uses only one industry taxonomy:
 
 This avoids mixing Eastmoney `BK%` industry IDs with Shenwan-style `%.SI` IDs in the
 same ranking query.
+
+Practical implication in the current DB:
+
+- late-April 2026 board mapping is no longer aligned with this `BK%`-only rule
+- do not treat `cn_stock_leader_score_v2` as a reliable late-April 2026 latest snapshot source
 
 ## Data Sources
 

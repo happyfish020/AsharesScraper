@@ -23,6 +23,13 @@ Reason:
 
 - these endpoints naturally return one security's historical statement / event history
 - Tushare docs for `forecast` and `express` explicitly describe the standard endpoint as single-stock history first
+- implementation rule:
+  - outer loop must be `symbol`
+  - inner constraint can be `date range` / `period range`
+  - do not explode one symbol window into `symbol x day` requests unless the upstream API explicitly requires that shape
+- optimization target:
+  - one symbol -> one bounded history call whenever possible
+  - fetch a compact date window, then filter locally by disclosure dates / periods if needed
 
 ## 2. Date-first
 
@@ -37,6 +44,9 @@ Reason:
 
 - `daily_basic` official docs explicitly recommend date-based extraction for full history
 - these interfaces are naturally aligned to one market date returning many securities
+- implementation rule:
+  - outer loop must be `date`
+  - avoid converting a market snapshot API into `symbol-first`
 - **Hybrid (Daily Price):** For `stock_daily_price`, the system uses a smart switch:
   - If `days > 1`: Uses **Symbol-first** to fill historical gaps per security.
   - If `days == 1`: 
@@ -61,6 +71,11 @@ Current examples in this project:
   - `income`: symbol-first
   - `balancesheet`: symbol-first
   - `fina_indicator`: symbol-first
+  - `cashflow`: symbol-first
+  - incremental mode:
+    - disclosure table decides which symbols need refresh
+    - actual fetch still runs `symbol-first`
+    - loader fetches one compact date window per symbol, then filters locally by disclosure dates
 - `event`
   - `forecast`: symbol-first
   - `express`: symbol-first
@@ -80,6 +95,10 @@ Current examples in this project:
   - security history -> `symbol-first`
   - market snapshot -> `date-first`
   - reporting batch -> `period-first`
+- practical default in this repo:
+  - if API primary key is `ts_code`: `loop symbol`, then apply date/period bounds
+  - if API primary key is `trade_date` / `ann_date`: `loop date`
+  - prefer fewer wider calls over many tiny calls, as long as local filtering can preserve correctness
 
 
 用法：

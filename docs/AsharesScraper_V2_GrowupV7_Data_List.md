@@ -126,4 +126,28 @@
 - `cn_stock_daily_basic` 在这个项目里是“实时估值优先表”，但历史回测真正兜底依赖的是 `cn_stock_monthly_basic`。
 - `weekly` 脚本不是周表策略，只是周频运行逻辑，所以不要为它单独设计周表。
 - `cn_market` 只是库名/数据域概念，不是项目直接查询的业务表。
+## 10. Object Type Clarification
 
+Checked in local `cn_market` on `2026-05-05`:
+
+- `cn_stock_leader_score_v2` is a `VIEW`, not a physical table
+- daily `stock_basic` refresh rebuilds that view after loading `cn_stock_daily_basic`
+- in the current DB, `cn_stock_leader_score_v2` returns `0` rows on `2026-04-29` and `2026-04-30`
+
+## 11. Near-Term Scoring Window
+
+For the current Foundation / unified scoring work, the practical near-term data window verified on `2026-05-05` is:
+
+- `cn_stock_daily_basic`: `2026-01-05` to `2026-04-30`
+- `cn_sw_industry_daily`: `2026-01-05` to `2026-04-30`, `31` SW L1 industries
+- `cn_stock_monthly_basic`: `2026-01-30` to `2026-04-30`
+- `cn_stock_income` / `cn_stock_balancesheet` / `cn_stock_fina_indicator` / `cn_stock_cashflow`: latest report period `2026-03-31`
+- `cn_board_member_map_d`:
+  - `INDUSTRY`: available through `2026-04-30`
+  - `CONCEPT`: available through `2026-04-30`
+- `cn_stock_leader_sw_l1_latest_snap`: verified at `2026-04-30`
+
+Concept-history constraint:
+
+- Tushare `concept_detail` membership history in the current upstream payload only supports overlap from `2021-02-05` onward.
+- For scoring systems that need concept/subtheme history, treat pre-`2021-02-05` concept membership as unsupported by this source.

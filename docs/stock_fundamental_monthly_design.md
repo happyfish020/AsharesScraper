@@ -156,6 +156,11 @@ Env vars:
 - `cn_stock_income` stores the official profit statement history and is the primary source for `n_income_attr_p`.
 - `cn_stock_balancesheet` stores official Tushare balance-sheet rows including `accounts_receiv` and `inventories`.
 - `cn_stock_fina_indicator` stores quarterly report-period history.
+- fetch-shape rule:
+  - `monthly_basic` is `date-first` because `daily_basic(trade_date=...)` is a market snapshot API
+  - `income` / `balancesheet` / `fina_indicator` / `cashflow` are `symbol-first` because the primary API entrance is `ts_code`
+  - even in incremental mode driven by `cn_event_disclosure_date`, the loader groups disclosure dates by `symbol`, fetches one compact date window per `symbol`, then filters locally by disclosure dates
+  - historical backfill with `--by-symbol` keeps the same `symbol-first` shape and expands only the date window
 - both tables keep a `raw_payload` copy of the full provider row so future factors can be added without re-pulling old periods
 - recommended minimum fields for downstream strategies:
   - `cn_stock_income.n_income_attr_p`
@@ -184,6 +189,7 @@ Env vars:
 - `STOCK_FUNDAMENTAL_MONTHLY_FORCE=1` means "run today even if not on the scheduled day"
 - `STOCK_FUNDAMENTAL_MONTHLY_FULL_REBUILD=1` means "ignore existing max dates and rescan from HISTORY_START"
 - `STOCK_FUNDAMENTAL_MONTHLY_SKIP_QUALITY_SNAPSHOT=1` means "skip rebuilding cn_stock_fundamental_quality_snap if temp-table pressure is too high"
+- console progress now prints launch banner plus rolling progress / ETA so long backfills are observable
 
 ## Working-Capital Alert View
 

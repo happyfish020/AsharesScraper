@@ -81,6 +81,8 @@ Rate-limit handling:
 
 - `sw_daily` currently has a per-minute access limit
 - the sync script now auto-sleeps and retries when Tushare returns the 10-calls-per-minute limit error
+- the loader also enforces a pre-request throttle and recommends `>= 8.5s` spacing between codes for safer operation
+- current implementation hardcodes the safer throttle inside the loader so historical backfills do not rely on caller-provided delay parameters
 
 ## Usage
 

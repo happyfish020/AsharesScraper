@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -10,8 +11,13 @@ import pandas as pd
 import tushare as ts
 from sqlalchemy import text
 
-from app.settings import build_engine
+from app.settings import build_engine, load_sql_for_current_db
 from app.utils.progress import ProgressLogger
+
+
+def print(*args, **kwargs):
+    kwargs.setdefault("flush", True)
+    return builtins.print(*args, **kwargs)
 from app.tools.sync_cn_stock_daily_price_from_tushare import (
     _parse_ymd,
     patch_pandas_fillna_method_compat,
@@ -39,7 +45,7 @@ UPSERT_COLS = [
 
 
 def apply_ddl(engine, ddl_path: str) -> None:
-    sql = Path(ddl_path).read_text(encoding="utf-8")
+    sql = load_sql_for_current_db(ddl_path)
     with engine.begin() as conn:
         statements = [part.strip() for part in sql.split(";") if part.strip()]
         for stmt in statements:
@@ -332,6 +338,7 @@ def load_inst_fund_hold_summary_tushare(
     progress = ProgressLogger(name="inst_fund_hold_summary", total=len(periods), unit="quarters", log=log, every=1, min_interval_seconds=10.0)
 
     for period in periods:
+        progress.note(f"[inst_fund_hold_summary] fetching period={period}")
         raw = _fetch_fund_portfolio_period(
             pro,
             period,

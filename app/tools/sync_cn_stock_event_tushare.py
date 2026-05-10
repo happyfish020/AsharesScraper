@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 import json
 from datetime import date, datetime, timedelta
 import time
@@ -11,13 +12,18 @@ import pandas as pd
 import tushare as ts
 from sqlalchemy import text
 
-from app.settings import build_engine
+from app.settings import build_engine, load_sql_for_current_db
 from app.utils.progress import ProgressLogger
 from app.tools.sync_cn_stock_daily_price_from_tushare import (
     _parse_ymd,
     patch_pandas_fillna_method_compat,
     resolve_tushare_token,
 )
+
+
+def print(*args, **kwargs):
+    kwargs.setdefault("flush", True)
+    return builtins.print(*args, **kwargs)
 
 
 EVENT_TABLES = {
@@ -49,7 +55,7 @@ def _get_symbol_universe(engine) -> List[str]:
 
 
 def apply_ddl(engine, ddl_path: str) -> None:
-    sql = Path(ddl_path).read_text(encoding="utf-8")
+    sql = load_sql_for_current_db(ddl_path)
     with engine.begin() as conn:
         statements = [part.strip() for part in sql.split(";") if part.strip()]
         for stmt in statements:
@@ -146,6 +152,7 @@ def _fetch_by_month(pro, api_name: str, fields: str, start_date: date, end_date:
     month_ranges = list(_iter_month_ranges(start_date, end_date))
     progress = ProgressLogger(name=f"event.{api_name}", total=len(month_ranges), unit="months", log=log, every=3, min_interval_seconds=15.0)
     for s, e in month_ranges:
+        progress.note(f"[event.{api_name}] fetching {s}..{e}")
         raw = api(
             start_date=s.strftime("%Y%m%d"),
             end_date=e.strftime("%Y%m%d"),
@@ -169,6 +176,7 @@ def _fetch_by_ann_date(pro, api_name: str, fields: str, start_date: date, end_da
     total_days = (end_date - start_date).days + 1
     progress = ProgressLogger(name=f"event.{api_name}", total=total_days, unit="days", log=log, every=10, min_interval_seconds=15.0)
     while cur <= end_date:
+        progress.note(f"[event.{api_name}] fetching ann_date={cur}")
         for attempt in range(1, 4):
             try:
                 raw = api(ann_date=cur.strftime("%Y%m%d"), fields=fields)
@@ -200,6 +208,7 @@ def _fetch_dividend_by_ann_date(pro, fields: str, start_date: date, end_date: da
     progress = ProgressLogger(name="event.dividend", total=total_days, unit="days", log=log, every=10, min_interval_seconds=15.0)
     while cur <= end_date:
         ymd = cur.strftime("%Y%m%d")
+        progress.note(f"[event.dividend] fetching ann_date={ymd}")
         for attempt in range(1, 4):
             try:
                 raw = pro.dividend(ann_date=ymd, fields=fields)
@@ -240,6 +249,7 @@ def _fetch_symbol_history(
     api = getattr(pro, api_name)
     progress = ProgressLogger(name=f"event.{api_name}", total=len(symbols), unit="symbols", log=log, every=50, min_interval_seconds=20.0)
     for sym in symbols:
+        progress.note(f"[event.{api_name}] fetching ts_code={_symbol_to_ts_code(sym)}")
         raw = None
         for attempt in range(1, 4):
             try:
@@ -285,6 +295,7 @@ def _fetch_dividend_by_symbol(
     frames = []
     progress = ProgressLogger(name="event.dividend", total=len(symbols), unit="symbols", log=log, every=50, min_interval_seconds=20.0)
     for sym in symbols:
+        progress.note(f"[event.dividend] fetching ts_code={_symbol_to_ts_code(sym)}")
         raw = None
         for attempt in range(1, 4):
             try:

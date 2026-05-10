@@ -2,12 +2,25 @@
 
 目标：维护 `cn_stock_daily_basic`，为日常估值/市值查询和 `cn_stock_leader_score_v2` 提供稳定输入。
 
+## Current Object Note
+
+- checked in local `cn_market` on `2026-05-05`
+- `cn_stock_leader_score_v2` is currently a `VIEW`, not a physical table
+- `stock_basic` refresh rebuilds the leader-score views after loading `cn_stock_daily_basic`
+- in the current DB, `cn_stock_leader_score_v2` returns `0` rows on `2026-04-29` and `2026-04-30`
+
 ## API Strategy
 
 - `daily_basic` 使用 `trade_date` 作为主抓取维度
 - 一次 `pro.daily_basic(trade_date=YYYYMMDD)` 拉取一个交易日的全市场快照
 - 日更优先按最近交易日刷新
 - 历史回填建议按 `price` 交易日历、从近到远执行
+
+## Progress Output
+
+- loader prints a launch banner with provider, date range, calendar source, order, and batch size
+- rolling progress includes percent, current trade date, cumulative rows, affected rows, elapsed time, and ETA
+- when `--batch-size > 0`, console also prints `batch` and `batch_done` markers
 
 ## Runner Task
 
@@ -22,7 +35,7 @@ python runner.py --tasks stock_basic --asof latest
 - 启用 `stock_basic` 日更任务
 - 默认用 `price` 交易日历
 - 默认回刷最近 `7` 天，修复近期漏日也不怕
-- 完成后刷新：
+- 完成后重建视图：
   - `cn_stock_leader_score_v1`
   - `cn_stock_leader_score_v2`
 
@@ -59,7 +72,7 @@ python runner.py --tasks stock,board,stock_basic --asof latest
 
 - `stock` 先补日线价格
 - `board` 再补行业映射
-- `stock_basic` 最后补估值/市值并刷新 leader 视图
+- `stock_basic` 最后补估值/市值并重建 leader 视图
 
 ## 历史回填
 

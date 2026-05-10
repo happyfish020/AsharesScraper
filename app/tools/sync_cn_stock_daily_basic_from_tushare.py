@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable, List
@@ -11,13 +12,18 @@ import tushare as ts
 from sqlalchemy import text
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from app.settings import build_engine
+from app.settings import build_engine, load_sql_for_current_db
 from app.utils.progress import ProgressLogger
 from app.tools.sync_cn_stock_daily_price_from_tushare import (
     _parse_ymd,
     patch_pandas_fillna_method_compat,
     resolve_tushare_token,
 )
+
+
+def print(*args, **kwargs):
+    kwargs.setdefault("flush", True)
+    return builtins.print(*args, **kwargs)
 
 
 UPSERT_COLS = [
@@ -42,7 +48,7 @@ UPSERT_COLS = [
 
 
 def ensure_table(engine) -> None:
-    ddl = Path("docs/DDL/cn_market.cn_stock_daily_basic.sql").read_text(encoding="utf-8")
+    ddl = load_sql_for_current_db("docs/DDL/cn_market.cn_stock_daily_basic.sql")
     with engine.begin() as conn:
         conn.execute(text(ddl))
 
@@ -234,7 +240,7 @@ def fetch_daily_basic_akshare_snapshot(
 
     rows: List[dict] = []
     failures = 0
-    progress = ProgressLogger(name="stock_basic.akshare_snapshot", total=len(universe), unit="symbols", log=log, every=100, min_interval_seconds=20.0)
+    progress = ProgressLogger(name="stock_basic.akshare_snapshot", total=len(universe), unit="symbols", log=log, every=25, min_interval_seconds=8.0)
 
     def _worker(symbol: str):
         raw = ak.stock_individual_info_em(symbol=symbol, timeout=timeout)
@@ -283,15 +289,29 @@ def load_daily_basic_tushare(
     pro = ts.pro_api(token)
     total_rows = 0
     total_affected = 0
-    progress = ProgressLogger(name="stock_basic.tushare", total=len(trade_dates), unit="trade_dates", log=log, every=5, min_interval_seconds=15.0)
-    for batch_dates in chunked_dates(trade_dates, batch_size):
+    batch_count = max(1, (len(trade_dates) + max(1, batch_size) - 1) // max(1, batch_size)) if batch_size > 0 else 1
+    print(
+        f"[stock_basic.tushare] start trade_dates={len(trade_dates)} "
+        f"range={trade_dates[0]}..{trade_dates[-1]} calendar_source={calendar_source} "
+        f"descending={descending} batch_size={batch_size or 'continuous'} batches={batch_count}"
+    )
+    progress = ProgressLogger(name="stock_basic.tushare", total=len(trade_dates), unit="trade_dates", log=log, every=1, min_interval_seconds=5.0)
+    for batch_index, batch_dates in enumerate(chunked_dates(trade_dates, batch_size), start=1):
+        if batch_count > 1:
+            print(f"[stock_basic.tushare] batch {batch_index}/{batch_count} {batch_dates[0]}..{batch_dates[-1]}")
         for trade_dt in batch_dates:
+            progress.note(f"[stock_basic.tushare] fetching trade_date={trade_dt}")
             raw = fetch_daily_basic(pro, trade_dt)
             df = normalize_daily_basic(raw, source_label)
             affected = upsert_dataframe(engine, df)
             total_rows += int(len(df))
             total_affected += affected
             progress.update(current_item=str(trade_dt), rows=int(len(df)), affected=affected)
+        if batch_count > 1:
+            print(
+                f"[stock_basic.tushare] batch_done {batch_index}/{batch_count} "
+                f"cumulative_rows={total_rows} cumulative_affected={total_affected}"
+            )
     progress.finish()
     return total_rows, total_affected, trade_dates, "tushare"
 
@@ -319,7 +339,7 @@ def load_daily_basic_akshare(
 
 
 def apply_view(engine, ddl_path: str) -> None:
-    sql = Path(ddl_path).read_text(encoding="utf-8")
+    sql = load_sql_for_current_db(ddl_path)
     with engine.begin() as conn:
         conn.execute(text(sql))
 
@@ -378,6 +398,10 @@ def main() -> None:
 
     engine = build_engine()
     ensure_table(engine)
+    print(
+        f"[stock_basic] launch provider={args.provider} start={start_date} end={end_date} "
+        f"calendar_source={args.calendar_source} date_order={args.date_order} batch_size={args.batch_size}"
+    )
     total_rows = 0
     total_affected = 0
     used_provider = args.provider

@@ -7,6 +7,7 @@ from datetime import datetime, date
 from typing import Set
 
 from sqlalchemy import text
+from app.settings import get_db_name
 
 _BIND_RE = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -131,7 +132,7 @@ class SectorRotationSnapshotTask:
 
         sp_sql = os.getenv(
             "ROTATION_SNAPSHOT_SQL",
-            "CALL cn_market.SP_ROTATION_DAILY_REFRESH(:p_run_id, :p_trade_date, :p_force, :p_refresh_energy)",
+            f"CALL {get_db_name()}.SP_ROTATION_DAILY_REFRESH(:p_run_id, :p_trade_date, :p_force, :p_refresh_energy)",
         ).strip()
         if not sp_sql:
             raise RuntimeError(

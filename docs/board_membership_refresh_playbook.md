@@ -163,6 +163,22 @@ Notes:
 2. Script writes to `cn_board_industry_member_hist` and then rebuilds `cn_board_member_map_d` for the range.
 3. This script is for INDUSTRY mapping. Concept history needs a separate source chain.
 
+Practical earliest date guidance checked on `2026-05-07`:
+
+1. Tushare `SW2021` `L1` source can return history earlier than `2000`, with the earliest observed `in_date` around `1990-12-10`.
+2. But `cn_board_member_map_d` is expanded from `cn_stock_daily_price` trading dates, so the practical map floor is the earliest local price date.
+3. In the current project DB, `cn_stock_daily_price` starts at `2000-01-04`.
+4. Therefore:
+   - use `--start 2000-01-04` when your goal is the maximum usable daily map
+   - use an earlier start such as `1990-12-10` only if you also want to preserve extra raw rows in `cn_board_industry_member_hist`
+
+Recommended maximum usable L1 backfill:
+
+```bash
+set TUSHARE_TOKEN=YOUR_TOKEN
+python -m app.tools.backfill_sw_industry_history_from_tushare --start 2000-01-04 --end 2026-05-06 --src SW2021 --level L1 --map-chunk-years 1 --keep-existing-member-source
+```
+
 ## Historical Backfill From Tushare (Concept)
 
 Script:

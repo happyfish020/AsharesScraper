@@ -1043,7 +1043,7 @@ SET character_set_client = @saved_cs_client;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
-CREATE DEFINER=`cn_opr`@`localhost` PROCEDURE `SP_BACKFILL_ROT_BT_FROM_PRICE`(
+CREATE DEFINER=`cn_opr_red`@`localhost` PROCEDURE `SP_BACKFILL_ROT_BT_FROM_PRICE`(
     IN p_run_id VARCHAR(64),
     IN p_end_date DATE,
     IN p_force TINYINT
@@ -1179,7 +1179,7 @@ DELIMITER ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
-CREATE DEFINER=`cn_opr`@`localhost` PROCEDURE `sp_backfill_sector_eod_hist_monthly`(
+CREATE DEFINER=`cn_opr_red`@`localhost` PROCEDURE `sp_backfill_sector_eod_hist_monthly`(
     IN p_start_date DATE,
     IN p_end_date DATE,
     IN p_top_pct DECIMAL(10, 6),
@@ -1251,7 +1251,7 @@ DELIMITER ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
-CREATE DEFINER=`cn_opr`@`localhost` PROCEDURE `sp_build_board_member_map`(
+CREATE DEFINER=`cn_opr_red`@`localhost` PROCEDURE `sp_build_board_member_map`(
     IN p_start_date DATE,
     IN p_end_date DATE
 )
@@ -1306,7 +1306,7 @@ DELIMITER ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
-CREATE DEFINER=`cn_opr`@`localhost` PROCEDURE `SP_BUILD_SECTOR_ROTATION_RANKED_BY_DATE`(
+CREATE DEFINER=`cn_opr_red`@`localhost` PROCEDURE `SP_BUILD_SECTOR_ROTATION_RANKED_BY_DATE`(
     IN p_trade_date DATE
 )
 proc: BEGIN
@@ -1367,7 +1367,7 @@ DELIMITER ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
-CREATE DEFINER=`cn_opr`@`localhost` PROCEDURE `SP_BUILD_SECTOR_ROTATION_RANKED_LATEST`()
+CREATE DEFINER=`cn_opr_red`@`localhost` PROCEDURE `SP_BUILD_SECTOR_ROTATION_RANKED_LATEST`()
 proc: BEGIN
     CALL SP_BUILD_SECTOR_ROTATION_RANKED_BY_DATE(NULL);
 END proc ;;
@@ -1386,7 +1386,7 @@ DELIMITER ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
-CREATE DEFINER=`cn_opr`@`localhost` PROCEDURE `SP_BUILD_SECTOR_ROTATION_SIGNAL_BY_DATE`(
+CREATE DEFINER=`cn_opr_red`@`localhost` PROCEDURE `SP_BUILD_SECTOR_ROTATION_SIGNAL_BY_DATE`(
     IN p_trade_date DATE
 )
 proc: BEGIN
@@ -1477,7 +1477,7 @@ DELIMITER ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
-CREATE DEFINER=`cn_opr`@`localhost` PROCEDURE `SP_BUILD_SECTOR_ROTATION_SIGNAL_LATEST`()
+CREATE DEFINER=`cn_opr_red`@`localhost` PROCEDURE `SP_BUILD_SECTOR_ROTATION_SIGNAL_LATEST`()
 proc: BEGIN
     CALL SP_BUILD_SECTOR_ROTATION_SIGNAL_BY_DATE(NULL);
 END proc ;;
@@ -1496,36 +1496,65 @@ DELIMITER ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
-CREATE DEFINER=`cn_opr`@`localhost` PROCEDURE `sp_rebuild_rotation_20200101_20260228`()
-BEGIN
-    DECLARE done INT DEFAULT 0;
-    DECLARE v_dt DATE;
-
-    DECLARE cur CURSOR FOR
-        SELECT DISTINCT trade_date
-        FROM cn_stock_daily_price
-        WHERE trade_date BETWEEN '2020-01-01' AND '2026-02-28'
-        ORDER BY trade_date;
-
-    DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = 1;
-
-    OPEN cur;
-    read_loop: LOOP
-        FETCH cur INTO v_dt;
-        IF done = 1 THEN
-            LEAVE read_loop;
-        END IF;
-
-        CALL SP_BUILD_SECTOR_ROTATION_RANKED_BY_DATE(v_dt);
-        CALL SP_BUILD_SECTOR_ROTATION_SIGNAL_BY_DATE(v_dt);
-
-        -- 如果这次也要重建回测链路，取消下面两行注释
-        -- CALL SP_BACKFILL_ROT_BT_FROM_PRICE('SR_BASE_V535_EP90_XP55_XC2_MH5_RF5_K2_COST5BPS', v_dt, 0);
-    END LOOP;
-    CLOSE cur;
-
-    -- 如果上面补了 bt，再执行 NAV 修复
-    -- CALL SP_REPAIR_ROT_BT_NAV('SR_BASE_V535_EP90_XP55_XC2_MH5_RF5_K2_COST5BPS', 1.0000000000);
+CREATE DEFINER=`cn_opr_red`@`localhost` PROCEDURE `sp_rebuild_rotation_20200101_20260228`()
+BEGIN
+
+    DECLARE done INT DEFAULT 0;
+
+    DECLARE v_dt DATE;
+
+
+
+    DECLARE cur CURSOR FOR
+
+        SELECT DISTINCT trade_date
+
+        FROM cn_stock_daily_price
+
+        WHERE trade_date BETWEEN '2020-01-01' AND '2026-02-28'
+
+        ORDER BY trade_date;
+
+
+
+    DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = 1;
+
+
+
+    OPEN cur;
+
+    read_loop: LOOP
+
+        FETCH cur INTO v_dt;
+
+        IF done = 1 THEN
+
+            LEAVE read_loop;
+
+        END IF;
+
+
+
+        CALL SP_BUILD_SECTOR_ROTATION_RANKED_BY_DATE(v_dt);
+
+        CALL SP_BUILD_SECTOR_ROTATION_SIGNAL_BY_DATE(v_dt);
+
+
+
+        -- 如果这次也要重建回测链路，取消下面两行注释
+cn_opr_red
+        -- CALL SP_BACKFILL_ROT_BT_FROM_PRICE('SR_BASE_V535_EP90_XP55_XC2_MH5_RF5_K2_COST5BPS', v_dt, 0);
+
+    END LOOP;
+
+    CLOSE cur;
+
+
+
+    -- 如果上面补了 bt，再执行 NAV 修复
+
+    -- CALL SP_REPAIR_ROT_BT_NAV('SR_BASE_V535_EP90_XP55_XC2_MH5_RF5_K2_COST5BPS', 1.0000000000);
+
 END ;;
 DELIMITER ;
 /*!50003 SET sql_mode              = @saved_sql_mode */ ;
@@ -1607,7 +1636,7 @@ proc: BEGIN
          AND s.symbol = h.symbol
         SET h.valid_to = DATE_SUB(v_asof, INTERVAL 1 DAY),
             h.source = v_source
-        WHERE h.valid_to IS NULL
+        WHERE h.cn_opr_redto IS NULL
           AND s.board_id IS NULL;
 
         INSERT INTO cn_board_industry_member_hist (board_id, symbol, valid_from, valid_to, source)
@@ -1857,7 +1886,7 @@ proc: BEGIN
         VALUES (
             v_run_id, v_trade_date, NULL, 'ALL', '-1', 'NO_EXIT_TODAY',
             NULL, NULL, NULL, NULL,
-            NULL, NULL, 0, 0,
+            NULLcn_opr_red, 0, 0,
             'NO_EXIT',
             JSON_OBJECT('summary', 'NO_EXIT_TODAY'),
             NOW(6)
@@ -1993,7 +2022,7 @@ BEGIN
         FROM (
             SELECT b.*, PERCENT_RANK() OVER (PARTITION BY b.trade_date ORDER BY b.score DESC) AS pr
             FROM base b
-        ) b
+        ) bcn_opr_red
     )
     SELECT
         trade_date, sector_type, sector_id, members, amount_sum,
@@ -2066,7 +2095,7 @@ proc: BEGIN
             MAX(p.trade_date) AS last_trade_date,
             COUNT(DISTINCT CASE
                 WHEN p.trade_date BETWEEN DATE_SUB(v_asof, INTERVAL v_recent_days DAY) AND v_asof
-                THEN p.trade_date
+                cn_opr_red.trade_date
                 ELSE NULL
             END) AS recent_trade_days
         FROM cn_stock_daily_price p
@@ -2126,7 +2155,7 @@ proc: BEGIN
               AND b2.nav IS NOT NULL
             ORDER BY b2.trade_date DESC
             LIMIT 1
-        ), v_default_nav) AS nav_new
+        ), v_defcn_opr_redav) AS nav_new
     FROM cn_sector_rot_bt_daily_t b
     WHERE b.nav IS NULL
       AND (v_run_id IS NULL OR b.run_id = v_run_id);
@@ -2173,7 +2202,7 @@ proc: BEGIN
     END IF;
 
     IF IFNULL(p_refresh_energy, 1) = 1 THEN
-        DO 1;
+        DO 1;cn_opr_red
     END IF;
 
     -- Incremental sector index-level daily facts
@@ -2317,7 +2346,7 @@ proc: BEGIN
         metrics_json = VALUES(metrics_json),
         compare_asof = NOW(6),
         updated_at = NOW(6),
-        created_by = 'SP_VALIDATE_AGAINST_BASELINE';
+        created_cn_opr_redSP_VALIDATE_AGAINST_BASELINE';
 
     SELECT
         v_run_id AS run_id,
@@ -2408,7 +2437,7 @@ proc: BEGIN
         v_nav_last AS nav_last,
         v_nav_min AS nav_min,
         v_nav_max AS nav_max,
-        v_nav_null AS nav_null_rows,
+        v_nav_nullcn_opr_redv_null_rows,
         v_neg_nav AS nav_nonpositive_rows,
         v_sig_days AS signal_days,
         v_bt_days AS bt_days,
@@ -2426,7 +2455,7 @@ DELIMITER ;
 /*!50003 SET collation_connection  = @saved_col_connection */ ;
 
 --
--- Final view structure for view `cn_board_concept_eod_agg_v`
+-- Final view strucn_opr_redfor view `cn_board_concept_eod_agg_v`
 --
 
 /*!50001 DROP VIEW IF EXISTS `cn_board_concept_eod_agg_v`*/;
@@ -2444,7 +2473,7 @@ DELIMITER ;
 /*!50001 SET collation_connection      = @saved_col_connection */;
 
 --
--- Final view structure for view `cn_board_industry_eod_agg_v`
+-- Final view strucn_opr_redfor view `cn_board_industry_eod_agg_v`
 --
 
 /*!50001 DROP VIEW IF EXISTS `cn_board_industry_eod_agg_v`*/;
@@ -2462,7 +2491,7 @@ DELIMITER ;
 /*!50001 SET collation_connection      = @saved_col_connection */;
 
 --
--- Final view structure for view `cn_sector_energy_v`
+-- Final view strucn_opr_redfor view `cn_sector_energy_v`
 --
 
 /*!50001 DROP VIEW IF EXISTS `cn_sector_energy_v`*/;
@@ -2480,7 +2509,7 @@ DELIMITER ;
 /*!50001 SET collation_connection      = @saved_col_connection */;
 
 --
--- Final view structure for view `cn_sector_eod_agg_v`
+-- Final view strucn_opr_redfor view `cn_sector_eod_agg_v`
 --
 
 /*!50001 DROP VIEW IF EXISTS `cn_sector_eod_agg_v`*/;
@@ -2498,7 +2527,7 @@ DELIMITER ;
 /*!50001 SET collation_connection      = @saved_col_connection */;
 
 --
--- Final view structure for view `cn_sector_eod_feature_v`
+-- Final view strucn_opr_redfor view `cn_sector_eod_feature_v`
 --
 
 /*!50001 DROP VIEW IF EXISTS `cn_sector_eod_feature_v`*/;
@@ -2516,7 +2545,7 @@ DELIMITER ;
 /*!50001 SET collation_connection      = @saved_col_connection */;
 
 --
--- Final view structure for view `cn_sector_rotation_named_v`
+-- Final view strucn_opr_redfor view `cn_sector_rotation_named_v`
 --
 
 /*!50001 DROP VIEW IF EXISTS `cn_sector_rotation_named_v`*/;
@@ -2534,7 +2563,7 @@ DELIMITER ;
 /*!50001 SET collation_connection      = @saved_col_connection */;
 
 --
--- Final view structure for view `cn_sector_rotation_ranked_v_too_slow`
+-- Final view strucn_opr_redfor view `cn_sector_rotation_ranked_v_too_slow`
 --
 
 /*!50001 DROP VIEW IF EXISTS `cn_sector_rotation_ranked_v_too_slow`*/;
@@ -2552,7 +2581,7 @@ DELIMITER ;
 /*!50001 SET collation_connection      = @saved_col_connection */;
 
 --
--- Final view structure for view `cn_sector_rotation_state_v`
+-- Final view strucn_opr_redfor view `cn_sector_rotation_state_v`
 --
 
 /*!50001 DROP VIEW IF EXISTS `cn_sector_rotation_state_v`*/;
@@ -2570,7 +2599,7 @@ DELIMITER ;
 /*!50001 SET collation_connection      = @saved_col_connection */;
 
 --
--- Final view structure for view `cn_stock_active_universe_v`
+-- Final view strucn_opr_redfor view `cn_stock_active_universe_v`
 --
 
 /*!50001 DROP VIEW IF EXISTS `cn_stock_active_universe_v`*/;
@@ -2588,7 +2617,7 @@ DELIMITER ;
 /*!50001 SET collation_connection      = @saved_col_connection */;
 
 --
--- Final view structure for view `cn_stock_daily_price_active_v`
+-- Final view strucn_opr_redfor view `cn_stock_daily_price_active_v`
 --
 
 /*!50001 DROP VIEW IF EXISTS `cn_stock_daily_price_active_v`*/;
@@ -2606,7 +2635,7 @@ DELIMITER ;
 /*!50001 SET collation_connection      = @saved_col_connection */;
 
 --
--- Final view structure for view `v_rotation_entry_exec_v1`
+-- Final view strucn_opr_redfor view `v_rotation_entry_exec_v1`
 --
 
 /*!50001 DROP VIEW IF EXISTS `v_rotation_entry_exec_v1`*/;

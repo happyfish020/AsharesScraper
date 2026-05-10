@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 from datetime import date, datetime
-from pathlib import Path
 
 from sqlalchemy import text
 
-from app.settings import build_engine
+from app.settings import build_engine, load_sql_for_current_db
+
+
+def print(*args, **kwargs):
+    kwargs.setdefault("flush", True)
+    return builtins.print(*args, **kwargs)
 
 
 def _parse_ymd(s: str) -> date:
@@ -17,9 +22,22 @@ def _parse_ymd(s: str) -> date:
 
 
 def ensure_table(engine) -> None:
-    ddl = Path("docs/DDL/cn_market.cn_stock_leader_sw_l1_latest_snap.sql").read_text(encoding="utf-8")
+    ddl = load_sql_for_current_db("docs/DDL/cn_market.cn_stock_leader_sw_l1_latest_snap.sql")
     with engine.begin() as conn:
         conn.execute(text(ddl))
+
+
+def ensure_dependencies(engine) -> None:
+    ddl_paths = [
+        "docs/DDL/cn_market.cn_stock_universe_status_t.sql",
+        "docs/DDL/cn_market.cn_stock_active_universe_v.sql",
+        "docs/DDL/cn_market.cn_stock_non_active_universe_v.sql",
+        "docs/DDL/cn_market.cn_stock_daily_price_active_v.sql",
+    ]
+    with engine.begin() as conn:
+        for ddl_path in ddl_paths:
+            sql = load_sql_for_current_db(ddl_path)
+            conn.execute(text(sql))
 
 
 def resolve_effective_trade_date(engine) -> date:
@@ -27,7 +45,7 @@ def resolve_effective_trade_date(engine) -> date:
         """
         SELECT LEAST(
             COALESCE((SELECT MAX(trade_date) FROM cn_stock_daily_basic), DATE('1900-01-01')),
-            COALESCE((SELECT MAX(COALESCE(valid_from, DATE('1900-01-01'))) FROM cn_board_industry_member_hist WHERE source = 'tushare_sw_l1'), DATE('1900-01-01')),
+            COALESCE((SELECT MAX(trade_date) FROM cn_board_member_map_d WHERE sector_type = 'INDUSTRY'), DATE('1900-01-01')),
             COALESCE((SELECT MAX(trade_date) FROM cn_sw_industry_daily), DATE('1900-01-01'))
         ) AS effective_trade_date
         """
@@ -108,16 +126,25 @@ def build_snapshot(engine, trade_date: date) -> int:
             FROM price_window w
             GROUP BY w.symbol
         ),
-        sw_map AS (
+        sw_map_ranked AS (
             SELECT
                 t.trade_date,
                 h.symbol,
-                h.board_id AS sw_l1_id
+                h.board_id AS sw_l1_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY t.trade_date, h.symbol
+                    ORDER BY h.valid_from DESC, COALESCE(h.valid_to, DATE('9999-12-31')) DESC, h.board_id
+                ) AS rn
             FROM target_date t
             JOIN cn_board_industry_member_hist h
               ON h.source = 'tushare_sw_l1'
              AND t.trade_date >= h.valid_from
              AND t.trade_date <= COALESCE(h.valid_to, DATE('9999-12-31'))
+        ),
+        sw_map AS (
+            SELECT trade_date, symbol, sw_l1_id
+            FROM sw_map_ranked
+            WHERE rn = 1
         ),
         sw_l1_name AS (
             SELECT board_id, board_name
@@ -153,7 +180,7 @@ def build_snapshot(engine, trade_date: date) -> int:
                 END AS rs_20d_raw
             FROM sw_map m
             JOIN latest_20d p
-              ON p.symbol = m.symbol
+              ON p.symbol COLLATE utf8mb4_unicode_ci = m.symbol COLLATE utf8mb4_unicode_ci
              AND p.trade_date = m.trade_date
             LEFT JOIN sw_l1_name n
               ON n.board_id COLLATE utf8mb4_general_ci = m.sw_l1_id COLLATE utf8mb4_general_ci
@@ -386,7 +413,7 @@ def build_snapshot(engine, trade_date: date) -> int:
                 r.industry_members
             FROM ranked_base r
             LEFT JOIN cn_stock_daily_basic db
-              ON db.symbol COLLATE utf8mb4_unicode_ci = r.symbol
+              ON db.symbol COLLATE utf8mb4_unicode_ci = r.symbol COLLATE utf8mb4_unicode_ci
              AND db.trade_date = r.trade_date
         )
         SELECT
@@ -440,6 +467,7 @@ def main() -> int:
     args = p.parse_args()
 
     engine = build_engine()
+    ensure_dependencies(engine)
     ensure_table(engine)
 
     trade_date = _parse_ymd(args.trade_date) if (args.trade_date or "").strip() else resolve_effective_trade_date(engine)

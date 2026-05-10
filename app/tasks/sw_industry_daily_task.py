@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import os
-import time
 from dataclasses import dataclass
 from datetime import date, timedelta
+
+import tushare as ts
 
 from app.tools.sync_cn_stock_daily_price_from_tushare import (
     patch_pandas_fillna_method_compat,
     resolve_tushare_token,
 )
 from app.tools.sync_cn_sw_industry_daily_from_tushare import (
+    SW_DAILY_MIN_INTERVAL_SECONDS,
     ensure_table,
     fetch_sw_l1_codes_from_tushare,
     fetch_sw_daily_with_retry,
@@ -19,11 +21,10 @@ from app.tools.sync_cn_sw_industry_daily_from_tushare import (
     upsert_dataframe,
 )
 
-import tushare as ts
-
 
 def _parse_yyyymmdd(s: str) -> date:
     from datetime import datetime
+
     return datetime.strptime(str(s), "%Y%m%d").date()
 
 
@@ -45,7 +46,6 @@ class SwIndustryDailyTask:
         force = str(os.getenv("SW_INDUSTRY_DAILY_FORCE", "0")).strip().lower() in {"1", "true", "yes", "on"}
         src = str(os.getenv("SW_INDUSTRY_DAILY_SRC", "SW2021")).strip() or "SW2021"
         master_source = str(os.getenv("SW_INDUSTRY_DAILY_MASTER_SOURCE", "TUSHARE_SW2021_L1")).strip() or "TUSHARE_SW2021_L1"
-        sleep_between = float(os.getenv("SW_INDUSTRY_DAILY_SLEEP", "7.0"))
         source_label = str(os.getenv("SW_INDUSTRY_DAILY_SOURCE_LABEL", "tushare_sw_daily")).strip() or "tushare_sw_daily"
 
         patch_pandas_fillna_method_compat()
@@ -77,7 +77,15 @@ class SwIndustryDailyTask:
             }
 
         fields = "ts_code,trade_date,name,open,high,low,close,change,pct_change,vol,amount,pe,pb,float_mv"
-        total_rows = total_affected = touched = 0
+        total_rows = 0
+        total_affected = 0
+        touched = 0
+        ctx.log.info(
+            "[sw_industry_daily] launch codes=%s end_date=%s throttle=%.1fs",
+            len(codes),
+            end_date,
+            SW_DAILY_MIN_INTERVAL_SECONDS,
+        )
 
         for i, code in enumerate(codes, start=1):
             code_start = start_dates.get(code, default_start)
@@ -86,7 +94,13 @@ class SwIndustryDailyTask:
                 continue
             ctx.log.debug("[sw_industry_daily] %s/%s %s %s..%s", i, len(codes), code, code_start, end_date)
             try:
-                raw = fetch_sw_daily_with_retry(pro, ts_code=code, start_date=code_start, end_date=end_date, fields=fields)
+                raw = fetch_sw_daily_with_retry(
+                    pro,
+                    ts_code=code,
+                    start_date=code_start,
+                    end_date=end_date,
+                    fields=fields,
+                )
             except Exception as exc:
                 ctx.log.warning("[sw_industry_daily] %s fetch failed: %s", code, exc)
                 continue
@@ -97,8 +111,6 @@ class SwIndustryDailyTask:
             total_rows += len(df)
             total_affected += affected
             touched += 1
-            if sleep_between > 0:
-                time.sleep(sleep_between)
 
         ctx.log.info(
             "[sw_industry_daily] done codes=%s touched=%s rows=%s affected=%s end_date=%s",

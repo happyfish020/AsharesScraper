@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
@@ -13,7 +14,7 @@ import pandas as pd
 import tushare as ts
 from sqlalchemy import text
 
-from app.settings import build_engine
+from app.settings import build_engine, load_sql_for_current_db
 from app.utils.progress import ProgressLogger
 from app.tools.sync_cn_stock_daily_basic_from_tushare import (
     UPSERT_COLS as DAILY_BASIC_COLS,
@@ -25,6 +26,11 @@ from app.tools.sync_cn_stock_daily_price_from_tushare import (
     patch_pandas_fillna_method_compat,
     resolve_tushare_token,
 )
+
+
+def print(*args, **kwargs):
+    kwargs.setdefault("flush", True)
+    return builtins.print(*args, **kwargs)
 
 
 MONTHLY_BASIC_COLS = ["symbol", "trade_date", "month_key", *[c for c in DAILY_BASIC_COLS if c not in {"symbol", "trade_date"}], "raw_payload"]
@@ -174,7 +180,7 @@ def ensure_tables(engine) -> None:
 
 
 def apply_ddl(engine, ddl_path: str) -> None:
-    sql = Path(ddl_path).read_text(encoding="utf-8")
+    sql = load_sql_for_current_db(ddl_path)
     with engine.begin() as conn:
         statements = [part.strip() for part in sql.split(";") if part.strip()]
         for stmt in statements:
@@ -783,9 +789,10 @@ def _fetch_financial_by_ann_date(pro, api_name: str, fields: str, start_date: da
     api = getattr(pro, api_name)
     cur = start_date
     total_days = (end_date - start_date).days + 1
-    progress = ProgressLogger(name=f"stock_fundamental.{api_name}", total=total_days, unit="days", log=log, every=10, min_interval_seconds=15.0)
+    progress = ProgressLogger(name=f"stock_fundamental.{api_name}", total=total_days, unit="days", log=log, every=1, min_interval_seconds=5.0)
     while cur <= end_date:
         ymd = cur.strftime("%Y%m%d")
+        progress.note(f"[stock_fundamental.{api_name}] fetching ann_date={ymd}")
         raw = pd.DataFrame()
         try:
             raw = _fetch_with_retry(lambda d=ymd: api(ann_date=d, fields=fields), f"{api_name} ann_date={ymd}")
@@ -838,11 +845,14 @@ def _fetch_financial_by_symbol(
         total=len(symbols),
         unit="symbols",
         log=log,
-        every=50,
-        min_interval_seconds=15.0,
+        every=5,
+        min_interval_seconds=5.0,
     )
     for symbol in symbols:
         ts_code = _symbol_to_ts_code(symbol)
+        progress.note(
+            f"[stock_fundamental.{api_name}] fetching ts_code={ts_code} range={start_date.strftime('%Y%m%d')}..{end_date.strftime('%Y%m%d')}"
+        )
         try:
             raw = _fetch_with_retry(
                 lambda t=ts_code: api(
@@ -867,40 +877,63 @@ def _fetch_financial_by_symbol(
     return pd.concat(frames, ignore_index=True).drop_duplicates()
 
 
-def _get_disclosure_symbols_by_date(engine, start_date: date, end_date: date) -> dict[date, List[str]]:
-    """Return disclosure-driven symbols sliced by actual disclosure date only.
+def _get_disclosure_dates_by_symbol(engine, start_date: date, end_date: date) -> dict[str, List[date]]:
+    """Return actual disclosure dates grouped by symbol.
 
-    income/balancesheet/fina_indicator TuShare APIs require ts_code in this
-    environment. Use actual_date only; pre_date is scheduled/expected and can
-    expand one daily catch-up into thousands of unnecessary requests.
+    Quarterly financial APIs are ts_code-first. Even in incremental mode we
+    keep the outer loop on symbol, then request the minimum necessary date
+    window per symbol and filter locally by actual disclosure dates.
     """
     sql = text(
         """
-        SELECT actual_date AS disclosure_date, symbol
+        SELECT symbol, actual_date AS disclosure_date
         FROM cn_event_disclosure_date
         WHERE actual_date IS NOT NULL
           AND actual_date BETWEEN :start_date AND :end_date
           AND symbol IS NOT NULL AND symbol <> ''
-        ORDER BY actual_date, symbol
+        ORDER BY symbol, actual_date
         """
     )
-    by_date: dict[date, set[str]] = {}
+    by_symbol: dict[str, set[date]] = {}
     try:
         with engine.connect() as conn:
             rows = conn.execute(sql, {"start_date": start_date, "end_date": end_date}).fetchall()
     except Exception:
         return {}
 
-    for raw_dt, raw_symbol in rows:
+    for raw_symbol, raw_dt in rows:
         dt = pd.to_datetime(raw_dt, errors="coerce")
         if pd.isna(dt):
             continue
         symbol = str(raw_symbol).strip()
         if not symbol:
             continue
-        by_date.setdefault(dt.date(), set()).add(symbol)
+        by_symbol.setdefault(symbol, set()).add(dt.date())
 
-    return {dt: sorted(symbols) for dt, symbols in sorted(by_date.items())}
+    return {
+        symbol: sorted(disclosure_dates)
+        for symbol, disclosure_dates in sorted(by_symbol.items())
+        if disclosure_dates
+    }
+
+
+def _filter_raw_by_disclosure_dates(raw: pd.DataFrame, disclosure_dates: set[date]) -> pd.DataFrame:
+    if raw is None or raw.empty or not disclosure_dates:
+        return pd.DataFrame() if raw is None else raw
+
+    masks = []
+    for col in ["ann_date", "f_ann_date"]:
+        if col not in raw.columns:
+            continue
+        series = pd.to_datetime(raw[col], format="%Y%m%d", errors="coerce").dt.date
+        masks.append(series.isin(disclosure_dates))
+    if not masks:
+        return raw
+
+    keep_mask = masks[0].copy()
+    for extra_mask in masks[1:]:
+        keep_mask = keep_mask | extra_mask
+    return raw.loc[keep_mask].copy()
 
 def _fetch_financial_by_disclosure_dates(
     engine,
@@ -911,8 +944,8 @@ def _fetch_financial_by_disclosure_dates(
     end_date: date,
     log=None,
 ) -> pd.DataFrame:
-    symbols_by_date = _get_disclosure_symbols_by_date(engine, start_date, end_date)
-    total = sum(len(symbols) for symbols in symbols_by_date.values())
+    disclosure_dates_by_symbol = _get_disclosure_dates_by_symbol(engine, start_date, end_date)
+    total = len(disclosure_dates_by_symbol)
     if total <= 0:
         msg = f"[stock_fundamental.{api_name}] no disclosure symbols in {start_date}..{end_date}; skip ts_code fetch"
         if log:
@@ -921,8 +954,11 @@ def _fetch_financial_by_disclosure_dates(
             print(msg)
         return pd.DataFrame()
 
-    day_summary = ", ".join(f"{dt.strftime('%Y%m%d')}={len(symbols)}" for dt, symbols in symbols_by_date.items())
-    msg = f"[stock_fundamental.{api_name}] disclosure_date_slices={len(symbols_by_date)} total_symbols={total} {day_summary}"
+    total_disclosure_dates = sum(len(disclosure_dates) for disclosure_dates in disclosure_dates_by_symbol.values())
+    msg = (
+        f"[stock_fundamental.{api_name}] disclosure_symbol_windows={len(disclosure_dates_by_symbol)} "
+        f"total_disclosure_dates={total_disclosure_dates} range={start_date}..{end_date}"
+    )
     if log:
         log.info(msg)
     else:
@@ -933,28 +969,41 @@ def _fetch_financial_by_disclosure_dates(
     progress = ProgressLogger(
         name=f"stock_fundamental.{api_name}",
         total=total,
-        unit="disclosure_date_symbols",
+        unit="symbols",
         log=log,
-        every=10,
-        min_interval_seconds=15.0,
+        every=5,
+        min_interval_seconds=5.0,
     )
-    for disclosure_dt, symbols in symbols_by_date.items():
-        ymd = disclosure_dt.strftime("%Y%m%d")
-        for symbol in symbols:
-            ts_code = _symbol_to_ts_code(symbol)
-            try:
-                raw = _fetch_with_retry(
-                    lambda t=ts_code, d=ymd: api(ts_code=t, start_date=d, end_date=d, fields=fields),
-                    f"{api_name} ts_code={ts_code} disclosure_date={ymd}",
-                )
-            except Exception as exc:
-                progress.update(current_item=f"{ymd}:{symbol}", extra=f"failed={exc}")
-                continue
-            if raw is not None and not raw.empty:
-                frames.append(raw)
-                progress.update(current_item=f"{ymd}:{symbol}", rows=int(len(raw)))
-            else:
-                progress.update(current_item=f"{ymd}:{symbol}")
+    for symbol, disclosure_dates in disclosure_dates_by_symbol.items():
+        ts_code = _symbol_to_ts_code(symbol)
+        fetch_start = min(disclosure_dates)
+        fetch_end = max(disclosure_dates)
+        progress.note(
+            f"[stock_fundamental.{api_name}] fetching ts_code={ts_code} disclosure_range={fetch_start.strftime('%Y%m%d')}..{fetch_end.strftime('%Y%m%d')}"
+        )
+        try:
+            raw = _fetch_with_retry(
+                lambda t=ts_code, d1=fetch_start, d2=fetch_end: api(
+                    ts_code=t,
+                    start_date=d1.strftime("%Y%m%d"),
+                    end_date=d2.strftime("%Y%m%d"),
+                    fields=fields,
+                ),
+                f"{api_name} ts_code={ts_code} disclosure_range={fetch_start.strftime('%Y%m%d')}..{fetch_end.strftime('%Y%m%d')}",
+            )
+        except Exception as exc:
+            progress.update(current_item=ts_code, extra=f"failed={exc}")
+            continue
+        raw = _filter_raw_by_disclosure_dates(raw, set(disclosure_dates))
+        if raw is not None and not raw.empty:
+            frames.append(raw)
+            progress.update(
+                current_item=ts_code,
+                rows=int(len(raw)),
+                extra=f"disclosure_dates={len(disclosure_dates)}",
+            )
+        else:
+            progress.update(current_item=ts_code, extra=f"disclosure_dates={len(disclosure_dates)} rows=0")
     progress.finish()
     if not frames:
         return pd.DataFrame()
@@ -1022,8 +1071,13 @@ def load_monthly_basic_tushare(engine, start_date: date, end_date: date, calenda
     pro = ts.pro_api(token)
     total_rows = 0
     total_affected = 0
-    progress = ProgressLogger(name="stock_fundamental.monthly_basic", total=len(trade_dates), unit="trade_dates", log=log, every=12, min_interval_seconds=20.0)
+    print(
+        f"[stock_fundamental.monthly_basic] start trade_dates={len(trade_dates)} "
+        f"range={trade_dates[0]}..{trade_dates[-1]} calendar_source={calendar_source}"
+    )
+    progress = ProgressLogger(name="stock_fundamental.monthly_basic", total=len(trade_dates), unit="trade_dates", log=log, every=1, min_interval_seconds=5.0)
     for trade_dt in trade_dates:
+        progress.note(f"[stock_fundamental.monthly_basic] fetching trade_date={trade_dt}")
         raw = pro.daily_basic(
             trade_date=trade_dt.strftime("%Y%m%d"),
             fields=(
@@ -1343,6 +1397,10 @@ def main() -> None:
 
     engine = build_engine()
     ensure_tables(engine)
+    print(
+        f"[stock_fundamental] launch provider={args.provider} start={start_date} end={end_date} "
+        f"calendar_source={args.calendar_source} by_symbol={args.by_symbol} akshare_workers={args.akshare_workers}"
+    )
     basic_rows = basic_affected = income_rows = income_affected = balance_rows = balance_affected = 0
     fina_rows = fina_affected = cashflow_rows = cashflow_affected = 0
     basic_dates: List[date] = []

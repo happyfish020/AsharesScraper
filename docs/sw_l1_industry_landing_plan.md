@@ -418,6 +418,48 @@ python -m app.tools.backfill_sw_industry_history_from_tushare `
   --end 2026-04-17
 ```
 
+Recommended maximum practical history load for this project:
+
+```powershell
+$env:TUSHARE_TOKEN="YOUR_TOKEN"
+python -m app.tools.backfill_sw_industry_history_from_tushare `
+  --level L1 `
+  --src SW2021 `
+  --start 2000-01-04 `
+  --end 2026-05-06 `
+  --map-chunk-years 1 `
+  --keep-existing-member-source
+```
+
+Why `2000-01-04` is the practical project floor:
+
+- local `cn_stock_daily_price` currently starts at `2000-01-04`
+- `sp_build_board_member_map` expands history only onto trading dates that exist in `cn_stock_daily_price`
+- so `cn_board_member_map_d` cannot become earlier than the local price calendar
+
+Observed source boundary checked on `2026-05-07`:
+
+- Tushare `SW2021` `L1` membership history itself can return much earlier `in_date`
+- the earliest observed `in_date` across current L1 codes was around `1990-12-10`
+
+If you want the raw history table to preserve everything the source provides, you may load earlier:
+
+```powershell
+$env:TUSHARE_TOKEN="YOUR_TOKEN"
+python -m app.tools.backfill_sw_industry_history_from_tushare `
+  --level L1 `
+  --src SW2021 `
+  --start 1990-12-10 `
+  --end 2026-05-06 `
+  --map-chunk-years 1 `
+  --keep-existing-member-source
+```
+
+Important interpretation:
+
+- this earlier run can enrich `cn_board_industry_member_hist`
+- but `cn_board_member_map_d` still only starts from the earliest local price date, currently `2000-01-04`
+
 Recommended SW L1 incremental refresh:
 
 ```powershell

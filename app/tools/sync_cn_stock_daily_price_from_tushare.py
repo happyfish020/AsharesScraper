@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 import configparser
 import json
 import os
@@ -18,6 +19,11 @@ import tushare as ts
 from sqlalchemy import text
 
 from app.settings import build_engine
+
+
+def print(*args, **kwargs):
+    kwargs.setdefault("flush", True)
+    return builtins.print(*args, **kwargs)
 
 DEFAULT_TUSHARE_TOKEN = "16acec7cb9250190ecd69818107d7e4307a097235248830225a432fa"
 _PANDAS_FILLNA_PATCHED = False

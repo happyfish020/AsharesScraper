@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -10,11 +11,17 @@ import pandas as pd
 import tushare as ts
 from sqlalchemy import text
 
-from app.settings import build_engine
+from app.settings import build_engine, load_sql_for_current_db
 from app.tools.sync_cn_stock_daily_price_from_tushare import (
     patch_pandas_fillna_method_compat,
     resolve_tushare_token,
 )
+from app.utils.progress import ProgressLogger
+
+
+def print(*args, **kwargs):
+    kwargs.setdefault("flush", True)
+    return builtins.print(*args, **kwargs)
 
 
 UPSERT_COLS = [
@@ -35,6 +42,10 @@ UPSERT_COLS = [
     "source",
 ]
 
+SW_DAILY_MIN_INTERVAL_SECONDS = 8.5
+SW_DAILY_RETRY_SLEEP_SECONDS = 65
+_SW_DAILY_LAST_CALL_AT = 0.0
+
 
 def _parse_ymd(s: str) -> date:
     v = (s or "").strip()
@@ -48,7 +59,7 @@ def _to_ymd(d: date) -> str:
 
 
 def ensure_table(engine) -> None:
-    ddl = Path("docs/DDL/cn_market.cn_sw_industry_daily.sql").read_text(encoding="utf-8")
+    ddl = load_sql_for_current_db("docs/DDL/cn_market.cn_sw_industry_daily.sql")
     with engine.begin() as conn:
         conn.execute(text(ddl))
 
@@ -78,12 +89,27 @@ def fetch_sw_l1_codes_from_tushare(pro, *, src: str) -> List[str]:
     df = pro.index_classify(src=src, level="L1", fields="index_code,industry_name,level,src")
     if df is None or df.empty:
         return []
-    codes = sorted({str(v).strip() for v in df["index_code"].tolist() if str(v).strip()})
-    return codes
+    return sorted({str(v).strip() for v in df["index_code"].tolist() if str(v).strip()})
+
+
+def _respect_sw_daily_spacing() -> None:
+    global _SW_DAILY_LAST_CALL_AT
+    now = time.monotonic()
+    if _SW_DAILY_LAST_CALL_AT > 0:
+        elapsed = now - _SW_DAILY_LAST_CALL_AT
+        remaining = SW_DAILY_MIN_INTERVAL_SECONDS - elapsed
+        if remaining > 0:
+            print(f"[SW_DAILY] throttle sleep {remaining:.1f}s before request")
+            time.sleep(remaining)
+    _SW_DAILY_LAST_CALL_AT = time.monotonic()
 
 
 def _is_sw_daily_rate_limit(msg: str) -> bool:
-    return "频率超限" in msg or "每分钟最多访问" in msg or "sw_daily" in msg and "超限" in msg
+    return (
+        "棰戠巼瓒呴檺" in msg
+        or "姣忓垎閽熸渶澶氳闂" in msg
+        or ("sw_daily" in msg and "瓒呴檺" in msg)
+    )
 
 
 def fetch_sw_daily_with_retry(
@@ -97,19 +123,22 @@ def fetch_sw_daily_with_retry(
 ) -> pd.DataFrame:
     for attempt in range(max_retries):
         try:
+            _respect_sw_daily_spacing()
             return pro.sw_daily(
                 ts_code=ts_code,
                 start_date=_to_ymd(start_date),
                 end_date=_to_ymd(end_date),
                 fields=fields,
             )
-        except Exception as e:
-            msg = str(e)
+        except Exception as exc:
+            msg = str(exc)
             if not _is_sw_daily_rate_limit(msg) or attempt + 1 == max_retries:
                 raise
-            sleep_sec = 65
-            print(f"[SW_DAILY] {ts_code} hit rate limit; sleep {sleep_sec}s then retry {attempt + 2}/{max_retries}")
-            time.sleep(sleep_sec)
+            print(
+                f"[SW_DAILY] {ts_code} hit rate limit; "
+                f"sleep {SW_DAILY_RETRY_SLEEP_SECONDS}s then retry {attempt + 2}/{max_retries}"
+            )
+            time.sleep(SW_DAILY_RETRY_SLEEP_SECONDS)
     return pd.DataFrame()
 
 
@@ -120,9 +149,7 @@ def normalize_sw_daily(raw: pd.DataFrame, *, source_label: str) -> pd.DataFrame:
     out = raw.copy()
     out["ts_code"] = out["ts_code"].astype(str).str.strip()
     out["trade_date"] = pd.to_datetime(out["trade_date"], format="%Y%m%d", errors="coerce").dt.date
-
-    rename_map = {"pct_chg": "pct_change"}
-    out = out.rename(columns=rename_map)
+    out = out.rename(columns={"pct_chg": "pct_change"})
 
     numeric_cols = [
         "open",
@@ -213,7 +240,7 @@ def resolve_start_dates(engine, ts_codes: List[str], default_start: date) -> dic
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Sync Shenwan industry daily行情 from Tushare Pro sw_daily.")
+    p = argparse.ArgumentParser(description="Sync Shenwan industry daily from Tushare Pro sw_daily.")
     p.add_argument("--start", default="2000-01-01", help="YYYY-MM-DD or YYYYMMDD")
     p.add_argument("--end", default=date.today().strftime("%Y-%m-%d"), help="YYYY-MM-DD or YYYYMMDD")
     p.add_argument("--src", default="SW2021", help="Tushare Shenwan classification source")
@@ -221,7 +248,6 @@ def main() -> int:
     p.add_argument("--codes", default="", help="comma-separated ts_code list; default reads from cn_board_industry_master")
     p.add_argument("--token", default="", help="Tushare token; default uses project token resolver")
     p.add_argument("--config", default="", help="Optional config path for token resolver")
-    p.add_argument("--sleep", type=float, default=7.0, help="sleep seconds between codes (sw_daily limit: 10/min → ≥6s required)")
     p.add_argument("--full", action="store_true", help="full reload by requested range instead of incremental from max(trade_date)")
     args = p.parse_args()
 
@@ -255,15 +281,17 @@ def main() -> int:
     start_dates = {code: start for code in codes}
     if not args.full:
         existing = resolve_start_dates(engine, codes, start)
-        start_dates = {
-            code: max(start, existing.get(code, start))
-            for code in codes
-        }
+        start_dates = {code: max(start, existing.get(code, start)) for code in codes}
 
     fields = "ts_code,trade_date,name,open,high,low,close,change,pct_change,vol,amount,pe,pb,float_mv"
     total_rows = 0
     total_affected = 0
     touched = 0
+    print(
+        f"[SW_DAILY] launch codes={len(codes)} start={start} end={end} src={args.src} "
+        f"master_source={args.master_source} full={args.full} throttle={SW_DAILY_MIN_INTERVAL_SECONDS}s"
+    )
+    progress = ProgressLogger(name="sw_daily", total=len(codes), unit="codes", every=1, min_interval_seconds=5.0)
 
     for i, code in enumerate(codes, start=1):
         code_start = start_dates[code]
@@ -271,21 +299,20 @@ def main() -> int:
             code_start = pd.Timestamp(code_start).date()
         if code_start > end:
             print(f"[SW_DAILY] {i}/{len(codes)} {code} skip already up-to-date")
+            progress.update(current_item=code, extra="skip=up_to_date")
             continue
-        query_start = code_start if args.full else code_start
-        if not args.full and code_start == start_dates[code]:
-            # Re-pull the latest loaded day for idempotent repair.
-            query_start = query_start
-        print(f"[SW_DAILY] {i}/{len(codes)} {code} {query_start}..{end}")
+        print(f"[SW_DAILY] {i}/{len(codes)} {code} {code_start}..{end}")
+        progress.note(f"[SW_DAILY] fetching ts_code={code} range={code_start}..{end}")
         raw = fetch_sw_daily_with_retry(
             pro,
             ts_code=code,
-            start_date=query_start,
+            start_date=code_start,
             end_date=end,
             fields=fields,
         )
         df = normalize_sw_daily(raw, source_label="tushare_sw_daily")
         if df.empty:
+            progress.update(current_item=code, extra="rows=0")
             continue
         rows = len(df)
         affected = upsert_dataframe(engine, df)
@@ -293,8 +320,8 @@ def main() -> int:
         total_affected += affected
         touched += 1
         print(f"[SW_DAILY] {code} rows={rows} affected={affected}")
-        if args.sleep > 0:
-            time.sleep(args.sleep)
+        progress.update(current_item=code, rows=rows, affected=affected)
+    progress.finish(extra=f"touched={touched}")
 
     with engine.connect() as conn:
         summary = conn.execute(

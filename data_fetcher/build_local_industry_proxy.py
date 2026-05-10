@@ -806,17 +806,17 @@ def run_daily(engine, logger: logging.Logger, options: RunOptions) -> None:
     safe_min = resolve_proxy_min_date(engine)
     if safe_end is None or safe_min is None:
         logger.warning("daily refresh skipped: no safe source dates")
-        update_task_status(engine, "local_industry_proxy_daily", "WARN", "no safe source dates", None, None)
+        update_task_status(engine, "cn_local_industry_proxy_daily", "WARN", "no safe source dates", None, None)
         return
 
     start_date = options.start_date or (proxy_max + timedelta(days=1) if proxy_max else safe_min)
     if start_date > safe_end:
         logger.info("daily refresh skipped: already up to date start=%s end=%s", start_date, safe_end)
-        update_task_status(engine, "local_industry_proxy_daily", "OK", "already up to date", proxy_max, safe_end)
+        update_task_status(engine, "cn_local_industry_proxy_daily", "OK", "already up to date", proxy_max, safe_end)
         return
 
     inserted = rebuild_proxy_range(engine, logger, start_date, safe_end)
-    update_task_status(engine, "local_industry_proxy_daily", "OK", f"rebuilt rows={inserted}", safe_end, safe_end)
+    update_task_status(engine, "cn_local_industry_proxy_daily", "OK", f"rebuilt rows={inserted}", safe_end, safe_end)
 
 
 def run_weekly(engine, logger: logging.Logger, options: RunOptions) -> None:

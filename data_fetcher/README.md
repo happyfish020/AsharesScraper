@@ -170,7 +170,7 @@ python data_fetcher/build_local_industry_proxy.py --mode audit
 
 主键：
 
-- `(symbol, industry_id, valid_from)`
+- `(symbol, industry_id, in_date)`
 
 字段：
 
@@ -178,8 +178,8 @@ python data_fetcher/build_local_industry_proxy.py --mode audit
 - `industry_id`
 - `industry_name`
 - `industry_level`
-- `valid_from`
-- `valid_to`
+- `in_date`
+- `out_date`
 - `source`
 - `is_manual_override`
 - `updated_at`
@@ -187,8 +187,8 @@ python data_fetcher/build_local_industry_proxy.py --mode audit
 约束规则：
 
 - 任一日期同一 `symbol` 只能归属一个 `SW L1`
-- `valid_from <= valid_to`
-- 最后一条 `valid_to = 9999-12-31`
+- `in_date <= COALESCE(out_date, '2099-12-31')`
+- 最后一条 `out_date IS NULL`
 
 消费示例：
 
@@ -196,7 +196,7 @@ python data_fetcher/build_local_industry_proxy.py --mode audit
 SELECT *
 FROM cn_local_industry_map_hist
 WHERE symbol = '000001'
-ORDER BY valid_from;
+ORDER BY in_date;
 ```
 
 ### `cn_local_industry_proxy_daily`
@@ -318,7 +318,7 @@ SELECT
 FROM cn_stock_daily_price p
 JOIN cn_local_industry_map_hist m
   ON m.symbol = p.symbol
- AND p.trade_date BETWEEN m.valid_from AND m.valid_to
+ AND p.trade_date BETWEEN m.in_date AND COALESCE(m.out_date, DATE('2099-12-31'))
 LEFT JOIN cn_local_industry_proxy_daily x
   ON x.trade_date = p.trade_date
  AND x.industry_id = m.industry_id

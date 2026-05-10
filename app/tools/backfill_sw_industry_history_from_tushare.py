@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 import json
 import os
 import time
@@ -9,8 +10,16 @@ from typing import Dict, Iterable, List, Optional
 
 import requests
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 
 from app.settings import build_engine
+from app.tools.sync_cn_stock_daily_price_from_tushare import resolve_tushare_token
+from app.utils.progress import ProgressLogger
+
+
+def print(*args, **kwargs):
+    kwargs.setdefault("flush", True)
+    return builtins.print(*args, **kwargs)
 
 
 TS_URL = "https://api.tushare.pro"
@@ -33,6 +42,56 @@ def _to_db_date(s: Optional[str]) -> Optional[date]:
     if not s:
         return None
     return datetime.strptime(s, "%Y%m%d").date()
+
+
+def _year_chunks(start: date, end: date, years_per_chunk: int) -> Iterable[tuple[date, date]]:
+    if years_per_chunk < 1:
+        yield start, end
+        return
+
+    cur_year = start.year
+    while cur_year <= end.year:
+        chunk_start = date(cur_year, 1, 1)
+        chunk_end = date(min(cur_year + years_per_chunk - 1, end.year), 12, 31)
+        if chunk_start < start:
+            chunk_start = start
+        if chunk_end > end:
+            chunk_end = end
+        yield chunk_start, chunk_end
+        cur_year += years_per_chunk
+
+
+def _mysql_error_code(exc: Exception) -> Optional[int]:
+    if not isinstance(exc, OperationalError):
+        return None
+    orig = getattr(exc, "orig", None)
+    if not orig:
+        return None
+    args = getattr(orig, "args", None) or ()
+    if not args:
+        return None
+    try:
+        return int(args[0])
+    except Exception:
+        return None
+
+
+def _execute_with_retry(engine, sql, params: Dict[str, object], action: str, retries: int, sleep_sec: float) -> None:
+    for i in range(retries + 1):
+        try:
+            with engine.begin() as conn:
+                conn.execute(sql, params)
+            return
+        except Exception as exc:
+            code = _mysql_error_code(exc)
+            if code not in (1205, 1213) or i >= retries:
+                raise
+            wait_s = round(sleep_sec * (i + 1), 1)
+            print(
+                f"{action}_retry_wait attempt={i + 1}/{retries} "
+                f"mysql_code={code} sleep={wait_s}s"
+            )
+            time.sleep(wait_s)
 
 
 def _norm_symbol(con_code: str) -> str:
@@ -170,18 +229,30 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--level", default="L1", choices=["L1", "L2", "L3"], help="Shenwan classification level")
     p.add_argument("--master-source", default="", help="source label to write into cn_board_industry_master")
     p.add_argument("--member-source", default="", help="source label to write into cn_board_industry_member_hist")
-    p.add_argument("--token", default=os.getenv("TUSHARE_TOKEN", "").strip(), help="Tushare token, or set env TUSHARE_TOKEN")
+    p.add_argument("--token", default="", help="Tushare token")
+    p.add_argument("--config", default="", help="Config file path for Tushare token")
     p.add_argument("--sleep-ms", type=int, default=120, help="sleep milliseconds between index calls")
     p.add_argument("--skip-master", action="store_true", help="skip upserting cn_board_industry_master")
     p.add_argument("--skip-map", action="store_true", help="skip calling sp_build_board_member_map at the end")
+    p.add_argument(
+        "--map-chunk-years",
+        type=int,
+        default=1,
+        help="rebuild cn_board_member_map_d in year chunks; use 0 for one single sp_build_board_member_map call",
+    )
+    p.add_argument("--delete-retries", type=int, default=6, help="retry count for initial source delete on lock wait / deadlock")
+    p.add_argument("--delete-retry-sleep-sec", type=float, default=10.0, help="base sleep seconds for delete retries")
     p.add_argument("--keep-existing-member-source", action="store_true", help="do not delete existing rows for the selected member source before load")
     return p
 
 
 def run(args: argparse.Namespace) -> None:
-    token = (args.token or "").strip()
+    token, tried_files = resolve_tushare_token(args.token, getattr(args, "config", ""))
     if not token:
-        raise SystemExit("Tushare token is required. Use --token or env TUSHARE_TOKEN.")
+        msg = "Tushare token is required. Use --token, env TUSHARE_TOKEN/TS_TOKEN, or --config."
+        if tried_files:
+            msg += f" Tried files: {', '.join(str(p) for p in tried_files)}"
+        raise SystemExit(msg)
 
     start = _parse_ymd(args.start)
     end = _parse_ymd(args.end)
@@ -224,16 +295,19 @@ def run(args: argparse.Namespace) -> None:
         print(f"master_upserted={len(master_rows)}")
 
     if not args.keep_existing_member_source:
-        with engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    DELETE FROM cn_board_industry_member_hist
-                    WHERE source = :src
-                    """
-                ),
-                {"src": member_source},
-            )
+        _execute_with_retry(
+            engine=engine,
+            sql=text(
+                """
+                DELETE FROM cn_board_industry_member_hist
+                WHERE source = :src
+                """
+            ),
+            params={"src": member_source},
+            action="member_source_clear",
+            retries=int(getattr(args, "delete_retries", 6) or 0),
+            sleep_sec=float(getattr(args, "delete_retry_sleep_sec", 10.0) or 10.0),
+        )
         print(f"member_source_cleared={member_source}")
 
     insert_sql = text(
@@ -251,10 +325,12 @@ def run(args: argparse.Namespace) -> None:
     touched_codes = 0
     buf: List[Dict[str, object]] = []
     batch_size = 5000
+    progress = ProgressLogger(name=f"sw_{level.lower()}_history", total=len(code_rows), unit="index_codes", every=1, min_interval_seconds=5.0)
 
     for i, code_row in enumerate(code_rows, start=1):
         code = code_row["index_code"]
         code_rows_inserted = 0
+        progress.note(f"[sw_{level.lower()}_history] fetching {i}/{len(code_rows)} index_code={code}")
         for m in iter_index_members(token, code, start, end):
             vf = _to_db_date(m["in_date"])
             vt = _to_db_date(m["out_date"])
@@ -281,26 +357,38 @@ def run(args: argparse.Namespace) -> None:
             touched_codes += 1
         if args.sleep_ms > 0:
             time.sleep(args.sleep_ms / 1000.0)
-        if i % 20 == 0 or i == len(code_rows):
-            print(
-                f"progress {i}/{len(code_rows)} touched_codes={touched_codes} "
-                f"buffered={len(buf)} inserted={total_rows}"
-            )
+        progress.update(
+            current_item=code,
+            rows=code_rows_inserted,
+            extra=f"touched_codes={touched_codes} buffered={len(buf)} inserted={total_rows}",
+        )
 
     if buf:
         with engine.begin() as conn:
             conn.execute(insert_sql, buf)
         total_rows += len(buf)
         buf.clear()
+    progress.finish(extra=f"touched_codes={touched_codes} inserted={total_rows}")
 
     print(f"industry_hist_upserted={total_rows}")
 
     if not args.skip_map:
-        with engine.begin() as conn:
-            conn.execute(
-                text("CALL sp_build_board_member_map(:d1, :d2)"),
-                {"d1": start, "d2": end},
-            )
+        map_chunk_years = int(getattr(args, "map_chunk_years", 1) or 0)
+        map_ranges = list(_year_chunks(start, end, map_chunk_years))
+        print(
+            f"map_rebuild_start ranges={len(map_ranges)} "
+            f"chunk_years={map_chunk_years} range={start}..{end}"
+        )
+        for i, (d1, d2) in enumerate(map_ranges, start=1):
+            t0 = time.time()
+            print(f"map_rebuild_chunk_start {i}/{len(map_ranges)} range={d1}..{d2}")
+            with engine.begin() as conn:
+                conn.execute(
+                    text("CALL sp_build_board_member_map(:d1, :d2)"),
+                    {"d1": d1, "d2": d2},
+                )
+            elapsed = round(time.time() - t0, 1)
+            print(f"map_rebuild_chunk_done {i}/{len(map_ranges)} range={d1}..{d2} elapsed={elapsed}s")
 
     with engine.connect() as conn:
         stats = conn.execute(

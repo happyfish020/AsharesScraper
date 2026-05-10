@@ -51,6 +51,11 @@ Optional analytics views:
 27. `cn_market.cn_stock_fundamental_quality_snap.sql`
 28. `cn_market.cn_stock_financial_event_bridge_v1.sql`
 
+Note:
+
+- `cn_stock_leader_score_v1` and `cn_stock_leader_score_v2` are views
+- on the current local DB check (`2026-05-05`), `cn_stock_leader_score_v2` is still a `VIEW`, not a table
+
 Validation SPs:
 
 25. `cn_market.sp_validate_sector_rot_run.sql`
@@ -129,6 +134,8 @@ Then rebuilds:
 
 - `cn_stock_leader_score_v1`
 - `cn_stock_leader_score_v2`
+
+These are view rebuilds, not table loads.
 
 ## Weekly Runner Task
 
@@ -211,6 +218,14 @@ Env controls:
 
 - `STOCK_FUNDAMENTAL_MONTHLY_CASHFLOW_SOURCE_LABEL` (default: `tushare_cashflow`)
 - `STOCK_FUNDAMENTAL_MONTHLY_BY_SYMBOL` (default: `0`) — set to `1` to use symbol-based fetch (historical backfill mode) in runner task
+
+Operational rule update:
+
+- For quarterly financial APIs, treat `ts_code` as the primary fetch entrance.
+- Incremental mode remains disclosure-driven for scheduling, but the actual fetch shape is now `symbol-first`.
+- The loader groups disclosure dates by `symbol`, requests one bounded date window per `symbol`, then filters locally by disclosure dates.
+- Historical backfill with `--by-symbol` keeps the same `symbol-first` shape and simply widens the date window.
+- Long-running loaders print launch banner plus rolling progress / ETA in console.
 
 ## SW Industry Daily Task
 
