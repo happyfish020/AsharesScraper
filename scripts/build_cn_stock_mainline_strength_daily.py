@@ -84,6 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="Compute but do not write to DB")
     parser.add_argument("--replace", action="store_true", help="Replace existing rows in date range")
     parser.add_argument("--output-dir", default=None, help="Override report output directory")
+    parser.add_argument("--chunk-months", type=int, default=1, help="Months per processing chunk (default=1)")
     parser.add_argument("--verbose", action="store_true", help="Verbose logging")
     return parser
 
@@ -314,89 +315,48 @@ def _compute_breakout_ratio(industry_group: pd.DataFrame) -> float:
     total = len(industry_group)
     if total == 0:
         return 0.0
-    breakout_count = 0
-    for _, row in industry_group.iterrows():
-        br = _safe_float(row.get("breakout_ready", 0))
-        bs = _safe_float(row.get("breakout_strength", 0))
-        if br >= 1 or bs > 0:
-            breakout_count += 1
+    # Vectorized: avoid iterrows
+    br = pd.to_numeric(
+        industry_group.get("breakout_ready", pd.Series(0, index=industry_group.index)),
+        errors="coerce",
+    ).fillna(0.0)
+    bs = pd.to_numeric(
+        industry_group.get("breakout_strength", pd.Series(0, index=industry_group.index)),
+        errors="coerce",
+    ).fillna(0.0)
+    breakout_count = ((br >= 1) | (bs > 0)).sum()
     return _clip01(breakout_count / total)
 
 
-def _compute_trend_alignment(
-    industry_group: pd.DataFrame,
-    price_lookup: dict,
-    trade_date: date,
-    industry_id: str,
-) -> float:
-    """
-    Trend alignment score: proportion of stocks with positive price momentum
-    (close > pre_close) within the industry.
-    """
+def _compute_trend_alignment(industry_group: pd.DataFrame) -> float:
+    """Proportion of stocks with positive chg_pct (pre-merged into group)."""
     total = len(industry_group)
     if total == 0:
-        return 0.0
-    positive_count = 0
-    for _, row in industry_group.iterrows():
-        symbol = row.get("symbol", "")
-        key = (trade_date, symbol)
-        price_row = price_lookup.get(key)
-        if price_row is not None:
-            close = _safe_float(price_row.get("CLOSE"), 0.0)
-            pre_close = _safe_float(price_row.get("PRE_CLOSE"), 0.0)
-            if pre_close > 0 and close >= pre_close:
-                positive_count += 1
-        else:
-            chg = _safe_float(row.get("chg_pct", 0))
-            if chg > 0:
-                positive_count += 1
-    return _clip01(positive_count / total)
+        return 0.5
+    col = "price_chg_pct" if "price_chg_pct" in industry_group.columns else "chg_pct_fallback"
+    if col not in industry_group.columns:
+        return 0.5
+    chg = industry_group[col].fillna(0).astype(float)
+    return _clip01((chg > 0).sum() / total)
 
 
-def _compute_breadth_score(
-    industry_group: pd.DataFrame,
-    total_market_stocks: int,
-) -> float:
-    """
-    Breadth score: industry member count relative to total market.
-    Higher = more market participation.
-    Normalized to [0,1] using log scale.
-    """
-    member_count = len(industry_group)
+def _compute_breadth_score(member_count: int, total_market_stocks: int) -> float:
+    """Industry member count relative to total market, log-normalised."""
     if total_market_stocks <= 0 or member_count <= 0:
         return 0.0
     ratio = member_count / total_market_stocks
-    breadth = np.log1p(ratio * 100) / np.log(101)
-    return _clip01(breadth)
+    return _clip01(np.log1p(ratio * 100) / np.log(101))
 
 
-def _compute_acceleration_score(
-    industry_group: pd.DataFrame,
-    price_lookup: dict,
-    trade_date: date,
-) -> float:
-    """
-    Acceleration score: measures if the industry's momentum is accelerating.
-    Uses average chg_pct mapped to [0,1].
-    """
-    if len(industry_group) == 0:
-        return 0.0
-
-    chg_values = []
-    for _, row in industry_group.iterrows():
-        symbol = row.get("symbol", "")
-        key = (trade_date, symbol)
-        price_row = price_lookup.get(key)
-        if price_row is not None:
-            chg = _safe_float(price_row.get("CHG_PCT"), 0.0)
-            chg_values.append(chg)
-
-    if not chg_values:
+def _compute_acceleration_score(industry_group: pd.DataFrame) -> float:
+    """Average chg_pct mapped to [0,1]. Uses pre-merged price_chg_pct column."""
+    col = "price_chg_pct" if "price_chg_pct" in industry_group.columns else None
+    if col is None:
         return 0.5
-
-    avg_chg = np.mean(chg_values)
-    accel = _clip01((avg_chg + 10.0) / 20.0)
-    return accel
+    chg_values = industry_group[col].dropna().astype(float)
+    if chg_values.empty:
+        return 0.5
+    return _clip01((chg_values.mean() + 10.0) / 20.0)
 
 
 def _compute_lifecycle_bonus(lifecycle_state: str | None) -> float:
@@ -448,149 +408,84 @@ def _compute_mainline_strength_score(scores: dict[str, float]) -> float:
 # ---------------------------------------------------------------------------
 
 
-def run_build(args: argparse.Namespace) -> pd.DataFrame:
-    """
-    Execute the mainline strength build for the given date range.
-    Returns the computed DataFrame.
-    """
-    verbose = args.verbose
-    dry_run = args.dry_run
+def _ts() -> str:
+    return datetime.now().strftime("%H:%M:%S")
 
-    start = datetime.strptime(args.start, "%Y-%m-%d").date() if "-" in args.start else datetime.strptime(args.start, "%Y%m%d").date()
-    end = datetime.strptime(args.end, "%Y-%m-%d").date() if args.end and "-" in args.end else (
-        datetime.strptime(args.end, "%Y%m%d").date() if args.end else date.today()
-    )
-    if start > end:
-        print(f"ERROR: start {start} > end {end}")
-        sys.exit(1)
 
-    db_password = args.db_password or os.getenv("ASHARE_MYSQL_PASSWORD", "sec_Bobo123")
-    engine = build_engine(args.db_host, args.db_port, args.db_user, db_password, args.db_name)
+def _date_chunks(start: date, end: date, months: int) -> list[tuple[date, date]]:
+    chunks = []
+    cur = start
+    while cur <= end:
+        next_month = date(
+            cur.year + (cur.month + months - 1) // 12,
+            (cur.month + months - 1) % 12 + 1,
+            1,
+        )
+        chunk_end = min(next_month - timedelta(days=1), end)
+        chunks.append((cur, chunk_end))
+        cur = next_month
+    return chunks
 
-    if verbose:
-        print(f"[INFO] Date range: {start} ~ {end}")
-        print(f"[INFO] Database: {args.db_name}")
-        print(f"[INFO] Dry-run: {dry_run}")
 
-    # ── Load input data ─────────────────────────────────────────────
-    if verbose:
-        print("[INFO] Loading cn_stock_leader_score_daily ...")
-    leader_df = load_leader_scores(engine, start, end)
-    if verbose:
-        print(f"[INFO]   -> {len(leader_df)} rows loaded")
-
-    if verbose:
-        print("[INFO] Loading cn_mainline_lifecycle_daily ...")
-    lifecycle_df = load_mainline_lifecycle(engine, start, end)
-    if verbose:
-        print(f"[INFO]   -> {len(lifecycle_df)} rows loaded")
-
-    if verbose:
-        print("[INFO] Loading cn_board_member_map_d ...")
-    board_df = load_board_member_map(engine, start, end)
-    if verbose:
-        print(f"[INFO]   -> {len(board_df)} rows loaded")
-
-    if verbose:
-        print("[INFO] Loading cn_local_industry_map_hist ...")
-    ind_map_df = load_industry_map_hist(engine)
-    if verbose:
-        print(f"[INFO]   -> {len(ind_map_df)} rows loaded")
-
-    if verbose:
-        print("[INFO] Loading cn_stock_daily_price ...")
-    price_df = load_stock_daily_price(engine, start, end)
-    if verbose:
-        print(f"[INFO]   -> {len(price_df)} rows loaded")
-
-    if verbose:
-        print("[INFO] Loading cn_stock_daily_basic ...")
-    basic_df = load_stock_daily_basic(engine, start, end)
-    if verbose:
-        print(f"[INFO]   -> {len(basic_df)} rows loaded")
-
-    radar_df = pd.DataFrame()
-    try:
-        if verbose:
-            print("[INFO] Loading cn_ga_mainline_radar_daily ...")
-        radar_df = load_ga_mainline_radar(engine, start, end)
-        if verbose:
-            print(f"[INFO]   -> {len(radar_df)} rows loaded")
-    except Exception:
-        if verbose:
-            print("[INFO]   -> table not available, skipping")
-
+def _process_chunk(
+    leader_df: pd.DataFrame,
+    price_df: pd.DataFrame,
+    lifecycle_df: pd.DataFrame,
+    ind_name_lookup: dict[str, str],
+) -> pd.DataFrame:
+    """Compute mainline strength scores for one chunk. Returns result DataFrame."""
     if leader_df.empty:
-        print("WARNING: cn_stock_leader_score_daily is empty for the range")
         return pd.DataFrame()
 
-    # ── Build lookup maps ───────────────────────────────────────────
-    price_lookup: dict[tuple[date, str], dict] = {}
-    if not price_df.empty:
-        for _, row in price_df.iterrows():
-            price_lookup[(row["TRADE_DATE"], row["SYMBOL"])] = row.to_dict()
-
-    basic_lookup: dict[tuple[date, str], dict] = {}
-    if not basic_df.empty:
-        for _, row in basic_df.iterrows():
-            basic_lookup[(row["trade_date"], row["symbol"])] = row.to_dict()
-
-    lifecycle_lookup: dict[tuple[date, str], dict] = {}
-    if not lifecycle_df.empty:
-        for _, row in lifecycle_df.iterrows():
-            lifecycle_lookup[(row["trade_date"], row["mainline_id"])] = row.to_dict()
-
-    radar_lookup: dict[tuple[date, str], dict] = {}
-    if not radar_df.empty:
-        for _, row in radar_df.iterrows():
-            radar_lookup[(row["trade_date"], row["mainline_id"])] = row.to_dict()
-
-    ind_name_lookup: dict[str, str] = {}
-    if not ind_map_df.empty:
-        for _, row in ind_map_df.iterrows():
-            ind_name_lookup[row["industry_id"]] = row.get("industry_name", "")
-
-    board_membership: dict[tuple[date, str], set[str]] = {}
-    if not board_df.empty:
-        for _, row in board_df.iterrows():
-            key = (row["trade_date"], row["sector_id"])
-            if key not in board_membership:
-                board_membership[key] = set()
-            board_membership[key].add(row["symbol"])
-
-    # ── Prepare leader data ─────────────────────────────────────────
+    # Normalise leader_df
+    leader_df = leader_df.copy()
     leader_df["symbol"] = leader_df["symbol"].astype(str).str.split(".").str[0]
     leader_df["trade_date"] = pd.to_datetime(leader_df["trade_date"], errors="coerce").dt.date
     leader_df["industry_id"] = leader_df["industry_id"].fillna("")
+    leader_df = leader_df[leader_df["industry_id"] != ""]
 
-    # ── Compute per-industry per-date scores ────────────────────────
-    results: list[dict[str, Any]] = []
+    # ── Merge price CHG_PCT into leader_df (vectorised, no iterrows) ──
+    if not price_df.empty:
+        price_slim = price_df[["SYMBOL", "TRADE_DATE", "CHG_PCT"]].copy()
+        price_slim.columns = ["symbol", "trade_date", "price_chg_pct"]
+        price_slim["trade_date"] = pd.to_datetime(price_slim["trade_date"], errors="coerce").dt.date
+        leader_df = leader_df.merge(price_slim, on=["symbol", "trade_date"], how="left")
+    else:
+        leader_df["price_chg_pct"] = np.nan
+
+    # ── Lifecycle lookup: (trade_date, mainline_id) → lifecycle_state ──
+    lifecycle_lookup: dict[tuple, str] = {}
+    if not lifecycle_df.empty:
+        for _, row in lifecycle_df.iterrows():
+            lifecycle_lookup[(row["trade_date"], row["mainline_id"])] = str(row.get("lifecycle_state", ""))
+
+    # ── Pre-compute total stocks per date (for breadth_score) ───────
+    stocks_per_date: dict[date, int] = leader_df.groupby("trade_date")["symbol"].count().to_dict()
+
+    # ── Group and compute ────────────────────────────────────────────
     grouped = leader_df.groupby(["trade_date", "industry_id"])
+    n_groups = len(grouped)
+    report_every = max(50, n_groups // 20)
 
-    for (trade_date_val, industry_id), group in grouped:
-        if not industry_id:
-            continue
+    results: list[dict[str, Any]] = []
 
+    for g_idx, ((trade_date_val, industry_id), group) in enumerate(grouped, 1):
         industry_name = ind_name_lookup.get(industry_id, "")
-        if not industry_name:
-            industry_name = group["industry_name"].iloc[0] if "industry_name" in group.columns and pd.notna(group["industry_name"].iloc[0]) else ""
+        if not industry_name and "industry_name" in group.columns:
+            industry_name = group["industry_name"].iloc[0] or ""
 
-        lifecycle_state: str | None = None
-        lc_row = lifecycle_lookup.get((trade_date_val, industry_id))
-        if lc_row is not None:
-            lifecycle_state = str(lc_row.get("lifecycle_state", "")) or None
+        lc_state = lifecycle_lookup.get((trade_date_val, industry_id))
 
-        leader_density = _compute_leader_density(group)
-        avg_leader_score = _compute_avg_leader_score(group)
-        top_leader_score = _compute_top_leader_score(group)
-        breakout_ratio = _compute_breakout_ratio(group)
-        trend_alignment = _compute_trend_alignment(group, price_lookup, trade_date_val, industry_id)
-        total_market = len(leader_df[leader_df["trade_date"] == trade_date_val])
-        breadth_score = _compute_breadth_score(group, total_market)
-        acceleration_score = _compute_acceleration_score(group, price_lookup, trade_date_val)
-        lifecycle_bonus = _compute_lifecycle_bonus(lifecycle_state)
+        leader_density    = _compute_leader_density(group)
+        avg_leader_score  = _compute_avg_leader_score(group)
+        top_leader_score  = _compute_top_leader_score(group)
+        breakout_ratio    = _compute_breakout_ratio(group)
+        trend_alignment   = _compute_trend_alignment(group)
+        breadth_score     = _compute_breadth_score(len(group), stocks_per_date.get(trade_date_val, 1))
+        acceleration_score = _compute_acceleration_score(group)
+        lifecycle_bonus   = _compute_lifecycle_bonus(lc_state)
 
-        scores = {
+        mainline_strength_score = _compute_mainline_strength_score({
             "avg_leader_score": avg_leader_score,
             "leader_density": leader_density,
             "breakout_ratio": breakout_ratio,
@@ -598,9 +493,7 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
             "breadth_score": breadth_score,
             "acceleration_score": acceleration_score,
             "lifecycle_bonus": lifecycle_bonus,
-        }
-
-        mainline_strength_score = _compute_mainline_strength_score(scores)
+        })
 
         results.append({
             "trade_date": trade_date_val,
@@ -617,33 +510,131 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
             "lifecycle_bonus": round(lifecycle_bonus, 8),
         })
 
+        if g_idx % report_every == 0:
+            print(f"    [{_ts()}] computed {g_idx:,}/{n_groups:,} groups"
+                  f"  ({g_idx * 100 // n_groups}%)"
+                  f"  last_date={trade_date_val}")
+
     if not results:
-        print("WARNING: No results computed")
         return pd.DataFrame()
 
     result_df = pd.DataFrame(results)
 
-    # ── Compute rank_in_market (per trade_date) ─────────────────────
-    print("  Computing market ranks ...")
-    result_df["rank_in_market"] = 0
-    for dt, group in result_df.groupby("trade_date"):
-        ranked = group["mainline_strength_score"].rank(ascending=False, method="min")
-        mask = result_df["trade_date"] == dt
-        result_df.loc[mask, "rank_in_market"] = ranked.astype(int)
-
-    # ── Compute is_active_mainline ──────────────────────────────────
+    # rank_in_market and is_active_mainline
+    result_df["rank_in_market"] = (
+        result_df.groupby("trade_date")["mainline_strength_score"]
+        .rank(ascending=False, method="min")
+        .astype(int)
+    )
     result_df["is_active_mainline"] = (
         result_df["mainline_strength_score"] >= ACTIVE_MAINLINE_THRESHOLD
     ).astype(int)
 
-    result_df = result_df[result_df["trade_date"].between(start, end)].copy()
+    return result_df
 
-    if verbose:
-        print(f"[INFO] Computed {len(result_df)} rows")
-        print(f"[INFO] Mainline strength score range: [{result_df['mainline_strength_score'].min():.4f}, {result_df['mainline_strength_score'].max():.4f}]")
-        active_count = result_df["is_active_mainline"].sum()
-        print(f"[INFO] Active mainlines: {active_count} / {len(result_df)}")
 
+def run_build(args: argparse.Namespace) -> pd.DataFrame:
+    """
+    Execute the mainline strength build in monthly chunks with progress output.
+    Writes to DB per-chunk. Returns the combined DataFrame of all chunks.
+    """
+    verbose = args.verbose
+    dry_run = args.dry_run
+
+    start = datetime.strptime(args.start, "%Y-%m-%d").date() if "-" in args.start else datetime.strptime(args.start, "%Y%m%d").date()
+    end = datetime.strptime(args.end, "%Y-%m-%d").date() if args.end and "-" in args.end else (
+        datetime.strptime(args.end, "%Y%m%d").date() if args.end else date.today()
+    )
+    if start > end:
+        print(f"ERROR: start {start} > end {end}")
+        sys.exit(1)
+
+    db_password = args.db_password or os.getenv("ASHARE_MYSQL_PASSWORD", "sec_Bobo123")
+    engine = build_engine(args.db_host, args.db_port, args.db_user, db_password, args.db_name)
+
+    chunk_months = getattr(args, "chunk_months", 1)
+    chunks = _date_chunks(start, end, chunk_months)
+    n_chunks = len(chunks)
+
+    print(f"[{_ts()}] Date range: {start} ~ {end}  ({n_chunks} chunks of {chunk_months} month(s))")
+
+    # Industry name map — small, load once
+    print(f"[{_ts()}] Loading industry name map ...")
+    ind_map_df = load_industry_map_hist(engine)
+    ind_name_lookup: dict[str, str] = {}
+    if not ind_map_df.empty:
+        for _, row in ind_map_df.iterrows():
+            ind_name_lookup[row["industry_id"]] = row.get("industry_name", "")
+    print(f"[{_ts()}]   -> {len(ind_name_lookup):,} industries")
+
+    all_results: list[pd.DataFrame] = []
+    total_written = 0
+
+    for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks, 1):
+        print()
+        print(f"[{_ts()}] ── Chunk {chunk_idx}/{n_chunks}: {chunk_start} ~ {chunk_end} ──")
+        t0 = datetime.now()
+
+        # Load sources for this chunk
+        t1 = datetime.now()
+        print(f"  [{_ts()}] Loading leader scores ...")
+        leader_df = load_leader_scores(engine, chunk_start, chunk_end)
+        print(f"  [{_ts()}]   -> {len(leader_df):,} rows  ({(datetime.now()-t1).seconds}s)")
+
+        if leader_df.empty:
+            print(f"  [{_ts()}] No leader data, skip")
+            continue
+
+        t2 = datetime.now()
+        print(f"  [{_ts()}] Loading price data ...")
+        price_df = load_stock_daily_price(engine, chunk_start, chunk_end)
+        print(f"  [{_ts()}]   -> {len(price_df):,} rows  ({(datetime.now()-t2).seconds}s)")
+
+        t3 = datetime.now()
+        print(f"  [{_ts()}] Loading lifecycle data ...")
+        try:
+            lifecycle_df = load_mainline_lifecycle(engine, chunk_start, chunk_end)
+            print(f"  [{_ts()}]   -> {len(lifecycle_df):,} rows  ({(datetime.now()-t3).seconds}s)")
+        except Exception as exc:
+            lifecycle_df = pd.DataFrame()
+            print(f"  [{_ts()}]   -> not available ({exc})")
+
+        # Compute
+        t4 = datetime.now()
+        print(f"  [{_ts()}] Computing scores ...")
+        chunk_df = _process_chunk(leader_df, price_df, lifecycle_df, ind_name_lookup)
+
+        elapsed_compute = (datetime.now() - t4).seconds
+        if chunk_df.empty:
+            print(f"  [{_ts()}] No output for this chunk")
+            continue
+
+        dates_done = chunk_df["trade_date"].nunique()
+        rows_out = len(chunk_df)
+        print(f"  [{_ts()}] Computed {rows_out:,} rows  ({dates_done} dates)  ({elapsed_compute}s)")
+
+        # Write
+        if not dry_run:
+            t5 = datetime.now()
+            written = write_to_db(engine, chunk_df, args.db_name, args.replace, dry_run, verbose)
+            total_written += written
+            print(f"  [{_ts()}] Wrote {written:,} rows to DB  ({(datetime.now()-t5).seconds}s)")
+        else:
+            total_written += rows_out
+            print(f"  [{_ts()}] [dry-run] would write {rows_out:,} rows")
+
+        all_results.append(chunk_df)
+
+        chunk_elapsed = (datetime.now() - t0).seconds
+        remaining_est = (n_chunks - chunk_idx) * chunk_elapsed
+        print(f"  [{_ts()}] Chunk done in {chunk_elapsed}s  ~{remaining_est // 60}m remaining")
+
+    if not all_results:
+        return pd.DataFrame()
+
+    result_df = pd.concat(all_results, ignore_index=True)
+    print()
+    print(f"[{_ts()}] All chunks complete. Total rows: {len(result_df):,}  written: {total_written:,}")
     return result_df
 
 

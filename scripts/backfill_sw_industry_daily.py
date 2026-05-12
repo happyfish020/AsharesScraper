@@ -81,6 +81,68 @@ MAX_RETRIES = 6
 RETRY_BASE_SLEEP = 12.0
 
 
+
+# ---------------------------------------------------------------------------
+# Source data preflight
+# ---------------------------------------------------------------------------
+
+def audit_source_data_coverage(engine, start: date, end: date, logger, src: str) -> None:
+    """
+    sw_daily backfill is sourced from Tushare. Before running, validate that
+    local code sources are available or Tushare will be used to resolve codes.
+    """
+    logger.info("source_audit_start required_range=%s~%s src=%s", start, end, src)
+
+    with engine.connect() as conn:
+        sw_table_exists = bool(
+            conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM INFORMATION_SCHEMA.TABLES
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = 'cn_sw_industry_daily'
+                    """
+                )
+            ).scalar()
+        )
+        master_exists = bool(
+            conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM INFORMATION_SCHEMA.TABLES
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = 'cn_local_industry_master'
+                    """
+                )
+            ).scalar()
+        )
+
+    if sw_table_exists:
+        logger.info("source_audit table=cn_sw_industry_daily status=OK_OR_WILL_CREATE")
+    else:
+        logger.info("source_audit table=cn_sw_industry_daily status=WILL_CREATE_BY_DDL")
+
+    if master_exists:
+        with engine.connect() as conn:
+            cnt = int(conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM cn_local_industry_master
+                    WHERE src = :src AND industry_level = 'L1'
+                    """
+                ),
+                {"src": src},
+            ).scalar() or 0)
+        logger.info("source_audit table=cn_local_industry_master src=%s rows=%s status=%s", src, cnt, "OK" if cnt > 0 else "EMPTY_TUSHARE_FALLBACK")
+    else:
+        logger.info("source_audit table=cn_local_industry_master status=MISSING_TUSHARE_FALLBACK")
+
+    logger.info("source_audit_pass")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -338,6 +400,7 @@ def main() -> None:
     date_range = resolve_date_range(args.start, args.end)
     logger = build_logger("backfill_sw_industry_daily")
     engine = build_engine()
+    audit_source_data_coverage(engine, date_range.start, date_range.end, logger, args.src)
 
     # Ensure DDL
     logger.info("Ensuring cn_sw_industry_daily table exists")

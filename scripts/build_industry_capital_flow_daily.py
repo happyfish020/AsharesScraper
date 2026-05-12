@@ -70,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="Compute but do not write to DB")
     parser.add_argument("--replace", action="store_true", help="Replace existing rows in date range")
     parser.add_argument("--output-dir", default=None, help="Override report output directory")
+    parser.add_argument("--chunk-months", type=int, default=1, help="Months per processing chunk (default=1)")
     parser.add_argument("--verbose", action="store_true", help="Verbose logging")
     return parser
 
@@ -165,7 +166,12 @@ def load_stock_daily_basic(engine: Engine, start: date, end: date) -> pd.DataFra
 
 
 def load_industry_map_hist(engine: Engine) -> pd.DataFrame:
-    """Load cn_local_industry_map_hist for stock-to-industry mapping with date ranges."""
+    """Load cn_local_industry_map_hist for stock-to-industry mapping with date ranges.
+    
+    Includes both 'L1' (legacy, valid through 2026-03-31) and 'SW_L1' (current,
+    valid from 2026-04-01 onward) industry levels to ensure coverage across
+    the industry mapping transition period.
+    """
     sql = """
     SELECT
         symbol,
@@ -175,7 +181,7 @@ def load_industry_map_hist(engine: Engine) -> pd.DataFrame:
         in_date,
         out_date
     FROM cn_local_industry_map_hist
-    WHERE industry_level = 'L1'
+    WHERE industry_level IN ('L1', 'SW_L1')
     ORDER BY symbol, in_date
     """
     return fetch_df(engine, sql)
@@ -320,10 +326,218 @@ def _compute_capital_flow_score(scores: dict[str, float]) -> float:
 # ---------------------------------------------------------------------------
 
 
+def _ts() -> str:
+    """Current timestamp string for progress lines."""
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def _date_chunks(start: date, end: date, months: int) -> list[tuple[date, date]]:
+    chunks = []
+    cur = start
+    while cur <= end:
+        next_month = date(
+            cur.year + (cur.month + months - 1) // 12,
+            (cur.month + months - 1) % 12 + 1,
+            1,
+        )
+        chunk_end = min(next_month - timedelta(days=1), end)
+        chunks.append((cur, chunk_end))
+        cur = next_month
+    return chunks
+
+
+def _build_ind_lookup(ind_map_df: pd.DataFrame) -> dict[str, list[dict[str, Any]]]:
+    """Build symbol → [(industry_id, industry_name, in_date, out_date)] lookup."""
+    ind_map_df = ind_map_df.copy()
+    ind_map_df["symbol"] = ind_map_df["symbol"].astype(str).str.split(".").str[0]
+    ind_map_df["in_date"] = pd.to_datetime(ind_map_df["in_date"], errors="coerce").dt.date
+    ind_map_df["out_date"] = pd.to_datetime(ind_map_df["out_date"], errors="coerce").dt.date
+
+    lookup: dict[str, list[dict[str, Any]]] = {}
+    for _, row in ind_map_df.iterrows():
+        sym = row["symbol"]
+        if sym not in lookup:
+            lookup[sym] = []
+        # Convert NaT (from out-of-range dates like 9999-12-31) to None
+        out_date = row["out_date"]
+        if out_date is pd.NaT:
+            out_date = None
+        lookup[sym].append({
+            "industry_id": row["industry_id"],
+            "industry_name": row.get("industry_name", ""),
+            "in_date": row["in_date"],
+            "out_date": out_date,
+        })
+    return lookup
+
+
+def _find_industry(
+    lookup: dict[str, list[dict[str, Any]]],
+    symbol: str,
+    trade_date: date,
+) -> tuple[str, str] | None:
+    for rec in lookup.get(symbol, []):
+        in_d = rec["in_date"]
+        out_d = rec["out_date"]
+        if in_d is not None and in_d <= trade_date:
+            if out_d is None or out_d >= trade_date:
+                return (rec["industry_id"], rec["industry_name"])
+    return None
+
+
+def _process_chunk(
+    price_df: pd.DataFrame,
+    basic_df: pd.DataFrame,
+    ind_lookup: dict[str, list[dict[str, Any]]],
+    prev_amount_by_industry: dict[str, float],
+    chunk_start: date,
+    chunk_end: date,
+    verbose: bool,
+) -> pd.DataFrame:
+    """Compute capital flow scores for one date-range chunk. Mutates prev_amount_by_industry."""
+    if price_df.empty:
+        return pd.DataFrame()
+
+    # Normalise columns
+    price_df = price_df.copy()
+    price_df["SYMBOL"] = price_df["SYMBOL"].astype(str).str.split(".").str[0]
+    price_df["TRADE_DATE"] = pd.to_datetime(price_df["TRADE_DATE"], errors="coerce").dt.date
+
+    basic_lookup: dict[tuple[date, str], dict] = {}
+    if not basic_df.empty:
+        basic_df = basic_df.copy()
+        basic_df["symbol"] = basic_df["symbol"].astype(str).str.split(".").str[0]
+        basic_df["trade_date"] = pd.to_datetime(basic_df["trade_date"], errors="coerce").dt.date
+        for _, row in basic_df.iterrows():
+            basic_lookup[(row["trade_date"], row["symbol"])] = row.to_dict()
+
+    # ── Assign industry using vectorised approach ───────────────────
+    # Build a "latest-membership" snapshot per symbol valid for each date.
+    # For the date range in this chunk, resolve via lookup (fast dict lookup per row).
+    total_rows = len(price_df)
+    price_with_ind: list[dict[str, Any]] = []
+    skipped = 0
+    report_every = max(10_000, total_rows // 20)   # report ~20 times per chunk
+
+    for idx, row in enumerate(price_df.itertuples(index=False), 1):
+        sym = row.SYMBOL
+        td = row.TRADE_DATE
+        ind_info = _find_industry(ind_lookup, sym, td)
+        if ind_info is None:
+            skipped += 1
+            continue
+        industry_id, industry_name = ind_info
+        basic_row = basic_lookup.get((td, sym), {})
+        price_with_ind.append({
+            "trade_date": td,
+            "symbol": sym,
+            "industry_id": industry_id,
+            "industry_name": industry_name,
+            "amount": _safe_float(row.AMOUNT, 0.0),
+            "turnover": _safe_float(row.TURNOVER_RATE, 0.0),
+            "chg_pct": _safe_float(row.CHG_PCT, 0.0),
+            "volume_ratio": _safe_float(basic_row.get("volume_ratio"), 0.0),
+        })
+        if idx % report_every == 0:
+            print(f"    [{_ts()}] assigned {idx:,}/{total_rows:,} rows"
+                  f"  ({idx*100//total_rows}%)  skipped={skipped:,}")
+
+    if skipped > 0 and verbose:
+        print(f"    [{_ts()}] skipped {skipped:,} rows (no industry mapping)")
+
+    if not price_with_ind:
+        return pd.DataFrame()
+
+    ind_price_df = pd.DataFrame(price_with_ind)
+
+    # ── Pre-compute daily market totals (avoid per-group date mask scan) ──
+    daily_totals = (
+        ind_price_df.groupby("trade_date")[["amount", "turnover"]]
+        .sum()
+        .rename(columns={"amount": "mkt_amount", "turnover": "mkt_turnover"})
+    )
+
+    # ── Aggregate per (trade_date, industry_id) ─────────────────────
+    results: list[dict[str, Any]] = []
+    grouped = ind_price_df.groupby(["trade_date", "industry_id"])
+    n_groups = len(grouped)
+    report_every_g = max(50, n_groups // 20)
+
+    for g_idx, ((trade_date_val, industry_id), group) in enumerate(grouped, 1):
+        industry_name = group["industry_name"].iloc[0]
+        total_amount = group["amount"].sum()
+        total_turnover = group["turnover"].sum()
+        avg_chg_pct = group["chg_pct"].mean()
+        avg_volume_ratio = group["volume_ratio"].mean()
+        member_count = len(group)
+        stock_amounts = group["amount"].tolist()
+
+        mkt_row = daily_totals.loc[trade_date_val] if trade_date_val in daily_totals.index else None
+        market_total_amount = float(mkt_row["mkt_amount"]) if mkt_row is not None else 0.0
+        market_total_turnover = float(mkt_row["mkt_turnover"]) if mkt_row is not None else 0.0
+
+        flow_strength_score = _compute_flow_strength_score(
+            total_amount, total_turnover, member_count,
+            market_total_amount, market_total_turnover,
+        )
+        market_share = _compute_market_share(total_amount, market_total_amount)
+        concentration_score = _compute_concentration_score(
+            total_amount, member_count, stock_amounts,
+        )
+        prev_amount = prev_amount_by_industry.get(industry_id)
+        rotation_speed_score = _compute_rotation_speed_score(
+            total_amount, member_count, total_turnover, prev_amount,
+        )
+        prev_amount_by_industry[industry_id] = total_amount
+
+        capital_flow_score = _compute_capital_flow_score({
+            "flow_strength_score": flow_strength_score,
+            "market_share": market_share,
+            "concentration_score": concentration_score,
+            "rotation_speed_score": rotation_speed_score,
+        })
+
+        results.append({
+            "trade_date": trade_date_val,
+            "industry_id": industry_id,
+            "industry_name": industry_name,
+            "total_amount": total_amount,
+            "total_turnover": total_turnover,
+            "avg_change_pct": round(avg_chg_pct, 6),
+            "volume_ratio": round(avg_volume_ratio, 6),
+            "market_share": round(market_share, 8),
+            "amount_rank": 0,
+            "flow_strength_score": round(flow_strength_score, 8),
+            "rotation_speed_score": round(rotation_speed_score, 8),
+            "concentration_score": round(concentration_score, 8),
+            "capital_flow_score": round(capital_flow_score, 8),
+        })
+
+        if g_idx % report_every_g == 0:
+            print(f"    [{_ts()}] aggregated {g_idx:,}/{n_groups:,} groups"
+                  f"  ({g_idx*100//n_groups}%)"
+                  f"  last_date={trade_date_val}")
+
+    if not results:
+        return pd.DataFrame()
+
+    result_df = pd.DataFrame(results)
+
+    # ── Amount rank per trade_date ───────────────────────────────────
+    result_df["amount_rank"] = (
+        result_df.groupby("trade_date")["total_amount"]
+        .rank(ascending=False, method="min")
+        .astype(int)
+    )
+
+    return result_df
+
+
 def run_build(args: argparse.Namespace) -> pd.DataFrame:
     """
     Execute the industry capital flow build for the given date range.
-    Returns the computed DataFrame.
+    Processes in monthly chunks to show progress and avoid loading all data at once.
+    Returns the full computed DataFrame (all chunks combined).
     """
     verbose = args.verbose
     dry_run = args.dry_run
@@ -339,217 +553,88 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
     db_password = args.db_password or os.getenv("ASHARE_MYSQL_PASSWORD", "sec_Bobo123")
     engine = build_engine(args.db_host, args.db_port, args.db_user, db_password, args.db_name)
 
-    if verbose:
-        print(f"[INFO] Date range: {start} ~ {end}")
-        print(f"[INFO] Database: {args.db_name}")
-        print(f"[INFO] Dry-run: {dry_run}")
+    chunk_months = getattr(args, "chunk_months", 1)
+    chunks = _date_chunks(start, end, chunk_months)
+    n_chunks = len(chunks)
 
-    # ── Load input data ─────────────────────────────────────────────
-    if verbose:
-        print("[INFO] Loading cn_stock_daily_price ...")
-    price_df = load_stock_daily_price(engine, start, end)
-    if verbose:
-        print(f"[INFO]   -> {len(price_df)} rows loaded")
-
-    if verbose:
-        print("[INFO] Loading cn_stock_daily_basic ...")
-    basic_df = load_stock_daily_basic(engine, start, end)
-    if verbose:
-        print(f"[INFO]   -> {len(basic_df)} rows loaded")
-
-    if verbose:
-        print("[INFO] Loading cn_local_industry_map_hist ...")
+    print(f"[{_ts()}] Date range: {start} ~ {end}  ({n_chunks} chunks of {chunk_months} month(s))")
+    print(f"[{_ts()}] Loading industry map ...")
     ind_map_df = load_industry_map_hist(engine)
-    if verbose:
-        print(f"[INFO]   -> {len(ind_map_df)} rows loaded")
-
-    if price_df.empty:
-        print("WARNING: cn_stock_daily_price is empty for the range")
-        return pd.DataFrame()
-
     if ind_map_df.empty:
         print("WARNING: cn_local_industry_map_hist is empty")
         return pd.DataFrame()
+    print(f"[{_ts()}]   -> {len(ind_map_df):,} rows")
 
-    # ── Prepare industry map ────────────────────────────────────────
-    # Build a lookup: for each symbol, find the industry it belongs to on a given date
-    ind_map_df["symbol"] = ind_map_df["symbol"].astype(str).str.split(".").str[0]
-    ind_map_df["in_date"] = pd.to_datetime(ind_map_df["in_date"], errors="coerce").dt.date
-    ind_map_df["out_date"] = pd.to_datetime(ind_map_df["out_date"], errors="coerce").dt.date
+    print(f"[{_ts()}] Building industry lookup ...")
+    ind_lookup = _build_ind_lookup(ind_map_df)
+    print(f"[{_ts()}]   -> {len(ind_lookup):,} symbols indexed")
 
-    # Build symbol -> list of (industry_id, industry_name, in_date, out_date)
-    ind_records_by_symbol: dict[str, list[dict[str, Any]]] = {}
-    for _, row in ind_map_df.iterrows():
-        sym = row["symbol"]
-        if sym not in ind_records_by_symbol:
-            ind_records_by_symbol[sym] = []
-        ind_records_by_symbol[sym].append({
-            "industry_id": row["industry_id"],
-            "industry_name": row.get("industry_name", ""),
-            "in_date": row["in_date"],
-            "out_date": row["out_date"],
-        })
-
-    def _find_industry_for_date(symbol: str, trade_date: date) -> tuple[str, str] | None:
-        """Find the industry for a symbol on a given trade_date using in_date/out_date ranges."""
-        records = ind_records_by_symbol.get(symbol, [])
-        for rec in records:
-            in_d = rec["in_date"]
-            out_d = rec["out_date"]
-            if in_d is not None and out_d is not None:
-                if in_d <= trade_date and (out_d is None or out_d >= trade_date):
-                    return (rec["industry_id"], rec["industry_name"])
-            elif in_d is not None:
-                if in_d <= trade_date:
-                    return (rec["industry_id"], rec["industry_name"])
-        return None
-
-    # ── Prepare price data ──────────────────────────────────────────
-    price_df["SYMBOL"] = price_df["SYMBOL"].astype(str).str.split(".").str[0]
-    price_df["TRADE_DATE"] = pd.to_datetime(price_df["TRADE_DATE"], errors="coerce").dt.date
-
-    # ── Prepare basic data ──────────────────────────────────────────
-    if not basic_df.empty:
-        basic_df["symbol"] = basic_df["symbol"].astype(str).str.split(".").str[0]
-        basic_df["trade_date"] = pd.to_datetime(basic_df["trade_date"], errors="coerce").dt.date
-
-    # Build basic lookup: (trade_date, symbol) -> row
-    basic_lookup: dict[tuple[date, str], dict] = {}
-    if not basic_df.empty:
-        for _, row in basic_df.iterrows():
-            basic_lookup[(row["trade_date"], row["symbol"])] = row.to_dict()
-
-    # ── Assign industry to each price row ───────────────────────────
-    print("  Assigning industry membership to price data ...")
-    price_with_ind: list[dict[str, Any]] = []
-    skipped_no_ind = 0
-    for _, row in price_df.iterrows():
-        sym = row["SYMBOL"]
-        td = row["TRADE_DATE"]
-        ind_info = _find_industry_for_date(sym, td)
-        if ind_info is None:
-            skipped_no_ind += 1
-            continue
-        industry_id, industry_name = ind_info
-
-        # Get basic data
-        basic_row = basic_lookup.get((td, sym), {})
-
-        amount = _safe_float(row.get("AMOUNT"), 0.0)
-        turnover = _safe_float(row.get("TURNOVER_RATE"), 0.0)
-        chg_pct = _safe_float(row.get("CHG_PCT"), 0.0)
-        volume_ratio = _safe_float(basic_row.get("volume_ratio"), 0.0)
-
-        price_with_ind.append({
-            "trade_date": td,
-            "symbol": sym,
-            "industry_id": industry_id,
-            "industry_name": industry_name,
-            "amount": amount,
-            "turnover": turnover,
-            "chg_pct": chg_pct,
-            "volume_ratio": volume_ratio,
-        })
-
-    if skipped_no_ind > 0 and verbose:
-        print(f"[INFO] Skipped {skipped_no_ind} price rows without industry mapping")
-
-    if not price_with_ind:
-        print("WARNING: No price data with industry mapping")
-        return pd.DataFrame()
-
-    ind_price_df = pd.DataFrame(price_with_ind)
-
-    # ── Compute per-industry per-date aggregates ────────────────────
-    print("  Computing industry-level aggregates ...")
-    results: list[dict[str, Any]] = []
-
-    # Track previous period amounts for rotation speed
+    all_results: list[pd.DataFrame] = []
     prev_amount_by_industry: dict[str, float] = {}
+    total_written = 0
 
-    grouped = ind_price_df.groupby(["trade_date", "industry_id"])
+    for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks, 1):
+        print()
+        print(f"[{_ts()}] ── Chunk {chunk_idx}/{n_chunks}: {chunk_start} ~ {chunk_end} ──")
 
-    for (trade_date_val, industry_id), group in grouped:
-        industry_name = group["industry_name"].iloc[0]
+        t0 = datetime.now()
+        print(f"  [{_ts()}] Loading price data ...")
+        price_df = load_stock_daily_price(engine, chunk_start, chunk_end)
+        print(f"  [{_ts()}]   -> {len(price_df):,} rows  ({(datetime.now()-t0).seconds}s)")
 
-        total_amount = group["amount"].sum()
-        total_turnover = group["turnover"].sum()
-        avg_chg_pct = group["chg_pct"].mean()
-        avg_volume_ratio = group["volume_ratio"].mean()
-        member_count = len(group)
-        stock_amounts = group["amount"].tolist()
+        if price_df.empty:
+            print(f"  [{_ts()}] No price data, skip")
+            continue
 
-        # Market-wide totals for this date
-        date_mask = ind_price_df["trade_date"] == trade_date_val
-        market_total_amount = ind_price_df.loc[date_mask, "amount"].sum()
-        market_total_turnover = ind_price_df.loc[date_mask, "turnover"].sum()
+        t1 = datetime.now()
+        print(f"  [{_ts()}] Loading basic data ...")
+        basic_df = load_stock_daily_basic(engine, chunk_start, chunk_end)
+        print(f"  [{_ts()}]   -> {len(basic_df):,} rows  ({(datetime.now()-t1).seconds}s)")
 
-        # ── Compute sub-scores ──────────────────────────────────────
-        flow_strength_score = _compute_flow_strength_score(
-            total_amount, total_turnover, member_count,
-            market_total_amount, market_total_turnover,
+        t2 = datetime.now()
+        print(f"  [{_ts()}] Assigning industry + computing scores ...")
+        chunk_df = _process_chunk(
+            price_df, basic_df, ind_lookup,
+            prev_amount_by_industry,
+            chunk_start, chunk_end, verbose,
         )
 
-        market_share = _compute_market_share(total_amount, market_total_amount)
+        elapsed = (datetime.now() - t2).seconds
+        if chunk_df.empty:
+            print(f"  [{_ts()}] No output for this chunk")
+            continue
 
-        concentration_score = _compute_concentration_score(
-            total_amount, member_count, stock_amounts,
-        )
+        dates_done = chunk_df["trade_date"].nunique()
+        rows_out = len(chunk_df)
+        print(f"  [{_ts()}] Computed {rows_out:,} rows  ({dates_done} dates)  ({elapsed}s)")
 
-        prev_amount = prev_amount_by_industry.get(industry_id)
-        rotation_speed_score = _compute_rotation_speed_score(
-            total_amount, member_count, total_turnover, prev_amount,
-        )
+        # Write immediately if not collecting for report
+        if not dry_run:
+            t3 = datetime.now()
+            written = write_to_db(engine, chunk_df, args.db_name, args.replace, dry_run, verbose)
+            total_written += written
+            print(f"  [{_ts()}] Wrote {written:,} rows to DB  ({(datetime.now()-t3).seconds}s)")
+        else:
+            total_written += rows_out
+            print(f"  [{_ts()}] [dry-run] would write {rows_out:,} rows")
 
-        # Update previous amount for next date
-        prev_amount_by_industry[industry_id] = total_amount
+        all_results.append(chunk_df)
 
-        scores = {
-            "flow_strength_score": flow_strength_score,
-            "market_share": market_share,
-            "concentration_score": concentration_score,
-            "rotation_speed_score": rotation_speed_score,
-        }
+        chunk_elapsed = (datetime.now() - t0).seconds
+        remaining = (n_chunks - chunk_idx) * chunk_elapsed
+        print(f"  [{_ts()}] Chunk done in {chunk_elapsed}s  ~{remaining//60}m remaining")
 
-        capital_flow_score = _compute_capital_flow_score(scores)
-
-        # Compute amount rank across industries for this date
-        results.append({
-            "trade_date": trade_date_val,
-            "industry_id": industry_id,
-            "industry_name": industry_name,
-            "total_amount": total_amount,
-            "total_turnover": total_turnover,
-            "avg_change_pct": round(avg_chg_pct, 6),
-            "volume_ratio": round(avg_volume_ratio, 6),
-            "market_share": round(market_share, 8),
-            "amount_rank": 0,  # will compute below
-            "flow_strength_score": round(flow_strength_score, 8),
-            "rotation_speed_score": round(rotation_speed_score, 8),
-            "concentration_score": round(concentration_score, 8),
-            "capital_flow_score": round(capital_flow_score, 8),
-        })
-
-    if not results:
-        print("WARNING: No results computed")
+    if not all_results:
         return pd.DataFrame()
 
-    result_df = pd.DataFrame(results)
+    result_df = pd.concat(all_results, ignore_index=True)
+    print()
+    print(f"[{_ts()}] All chunks complete. Total rows: {len(result_df):,}  written: {total_written:,}")
 
-    # ── Compute amount_rank (per trade_date) ────────────────────────
-    print("  Computing amount ranks ...")
-    result_df["amount_rank"] = 0
-    for dt, group in result_df.groupby("trade_date"):
-        ranked = group["total_amount"].rank(ascending=False, method="min")
-        mask = result_df["trade_date"] == dt
-        result_df.loc[mask, "amount_rank"] = ranked.astype(int)
-
-    # Filter to requested date range
-    result_df = result_df[result_df["trade_date"].between(start, end)].copy()
-
-    if verbose:
-        print(f"[INFO] Computed {len(result_df)} rows")
-        print(f"[INFO] Capital flow score range: [{result_df['capital_flow_score'].min():.4f}, {result_df['capital_flow_score'].max():.4f}]")
+    if verbose and not result_df.empty:
+        print(f"[{_ts()}] Capital flow score range: "
+              f"[{result_df['capital_flow_score'].min():.4f}, "
+              f"{result_df['capital_flow_score'].max():.4f}]")
 
     return result_df
 
@@ -779,15 +864,14 @@ def main() -> None:
     else:
         print(f"[WARNING] DDL file not found: {ddl_path}")
 
-    # Run build
+    # Run build (writes to DB per-chunk internally)
     result_df = run_build(args)
 
     if result_df.empty:
         print("No data computed. Exiting.")
         sys.exit(0)
 
-    # Write to DB
-    written = write_to_db(engine, result_df, args.db_name, args.replace, args.dry_run, args.verbose)
+    written = len(result_df) if args.dry_run else 0  # actual count logged inside run_build
 
     # Generate reports
     start = datetime.strptime(args.start, "%Y-%m-%d").date() if "-" in args.start else datetime.strptime(args.start, "%Y%m%d").date()

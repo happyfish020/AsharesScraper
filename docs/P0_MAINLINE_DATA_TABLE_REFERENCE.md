@@ -202,20 +202,40 @@ This document describes every table involved in the **P0 Mainline Data Foundatio
 ### [`cn_ga_mainline_radar_daily`](sql/ddl/ga_p0_mainline_context_schema.sql:42)
 | Aspect | Description |
 |--------|-------------|
-| **Purpose** | Daily radar snapshot of each mainline (industry). Tracks mainline state (ACTIVE/OBSERVE/FADE), strength trend, and rotation signals. |
+| **Purpose** | Daily radar snapshot of each mainline (industry). Tracks mainline state, strength trend, leader density, and rotation signals. Used by Factor 5 (leader_dominance_score) and Factor 8 (risk_crowding_score) in the Unified Alpha Engine. |
+| **Build Script** | [`scripts/build_ga_mainline_radar_daily.py`](scripts/build_ga_mainline_radar_daily.py) |
+| **Sources** | `cn_ga_stock_role_map_daily`, `cn_stock_daily_price`, `cn_stock_mainline_strength_daily` |
+| **Key Alpha Columns** | `leader_density` (leader_count/member_count), `new_high_ratio` (rs_pct ≥ 0.85 proxy), `breakout_ratio` (from mainline_strength), `trend_alignment_score` (up_ratio) |
+| **mainline_state ENUM** | `CONFIRMED` (score≥65), `FORMING` (50-65), `EARLY` (30-50), `ROTATING` (15-30), `FADE` (<15) |
+| **PK** | `(trade_date, mainline_id)` |
 | **Indexes** | `idx_trade_date`, `idx_mainline_date` (mainline_id, trade_date), `idx_state_date` (mainline_state, trade_date) |
+| **Run After** | `build_ga_stock_role_map_daily.py`, `build_cn_stock_mainline_strength_daily.py` |
 
 ### [`cn_ga_market_pulse_daily`](sql/ddl/ga_p0_mainline_context_schema.sql:52)
 | Aspect | Description |
 |--------|-------------|
-| **Purpose** | Daily market-wide pulse: aggregate market state (BULL/BEAR/RANGING), breadth metrics, and regime classification. |
+| **Purpose** | Daily market-wide pulse: aggregate market state, breadth metrics, and regime classification. Used by Factor 8 (risk_crowding_score) in the Unified Alpha Engine. |
+| **Build Script** | [`scripts/build_ga_market_pulse_daily.py`](scripts/build_ga_market_pulse_daily.py) |
+| **Sources** | `cn_ga_mainline_radar_daily`, `cn_index_daily_price` |
+| **Key Alpha Columns** | `bullish_industry_ratio` (CONFIRMED+FORMING mainline fraction), `bearish_industry_ratio` (FADE fraction), `market_phase` (TREND_EXPANSION/DIFFUSION/BOTTOM_REPAIR/DIVERGENCE/TOP_DECAY/RISK_OFF/CRISIS) |
+| **market_state ENUM** | `TREND_STRONG` (bullish>0.5), `TREND_WEAK` (bullish 0.3-0.5), `RANGE`, `RISK_OFF` (bearish>0.5) |
+| **market_phase logic** | RISK_OFF/CRISIS trigger +0.2 risk penalty in Factor 8 |
+| **PK** | `(trade_date)` |
 | **Indexes** | `idx_trade_date`, `idx_state_date` (market_state, trade_date) |
+| **Run After** | `build_ga_mainline_radar_daily.py` |
 
 ### [`cn_ga_stock_role_map_daily`](sql/ddl/ga_p0_mainline_context_schema.sql:60)
 | Aspect | Description |
 |--------|-------------|
-| **Purpose** | Daily mapping of each stock's role within its mainline: LEADER, FOLLOWER, LAGGARD, or OUT. |
+| **Purpose** | Daily mapping of each stock's role within its mainline. Provides `mainline_id` (critical bridge between stock and mainline for Factors 4/5/7/8) and `stock_role` (LEADER/CORE/MOMENTUM/NON_CORE). |
+| **Build Script** | [`scripts/build_ga_stock_role_map_daily.py`](scripts/build_ga_stock_role_map_daily.py) |
+| **Sources** | `cn_stock_leader_score_daily` only (full history 2010-01-04+) |
+| **Key Alpha Columns** | `mainline_id` (= industry_id from leader_score), `stock_role` (LEADER/CORE/MOMENTUM/NON_CORE) |
+| **stock_role ENUM** | `LEADER` (CORE_LEADER), `CORE` (NEAR_LEADER), `MOMENTUM` (EDGE_LEADER), `NON_CORE` (NON_LEADER) |
+| **role_score** | (leader/3)*40 + rs_pct*35 + turn_pct*25 (0-100) |
+| **PK** | `(trade_date, symbol)` |
 | **Indexes** | `idx_trade_date`, `idx_symbol_date` (symbol, trade_date), `idx_role_date` (stock_role, trade_date), `idx_mainline_date` (mainline_id, trade_date) |
+| **No Dependencies** | Self-contained from leader_score; run this FIRST among GA tables |
 
 ### [`cn_ga_market_context_daily`](sql/ddl/ga_p0_mainline_context_schema.sql:22)
 | Aspect | Description |
@@ -258,12 +278,22 @@ cn_local_industry_proxy_daily  ◄── build_local_industry_proxy_daily.py
 cn_industry_capital_flow_daily  ◄── industry_capital_flow.py
         │
         ▼
-cn_mainline_strength_daily  ◄── mainline_strength_daily.py
-        │
-        ├──► cn_ga_mainline_radar_daily
-        ├──► cn_ga_market_pulse_daily
-        ├──► cn_ga_stock_role_map_daily
-        └──► cn_ga_market_context_daily
+cn_mainline_strength_daily  ◄── build_cn_stock_mainline_strength_daily.py
+        │                                                    ▲
+        ▼                                                    │
+cn_stock_leader_score_daily ────────────────────────────────┤
+        │                                                    │
+        └──► cn_ga_stock_role_map_daily  ◄── build_ga_stock_role_map_daily.py
+                        │
+                        ▼
+        cn_ga_mainline_radar_daily  ◄── build_ga_mainline_radar_daily.py
+                        │    (also reads: cn_stock_daily_price,
+                        │                cn_stock_mainline_strength_daily)
+                        ▼
+        cn_ga_market_pulse_daily  ◄── build_ga_market_pulse_daily.py
+                        │    (also reads: cn_index_daily_price)
+                        ▼
+        cn_ga_market_context_daily  (no build script)
 
 cn_stock_income ──┐
 cn_stock_balancesheet ──┤

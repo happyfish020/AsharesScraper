@@ -50,6 +50,7 @@ def _shared_args(args: argparse.Namespace) -> argparse.Namespace:
 def main() -> None:
     args = build_parser().parse_args()
     steps = [item.strip() for item in str(args.steps).split(",") if item.strip()]
+    print('[SOURCE AUDIT] source data coverage audits are executed inside each selected pipeline step before processing.', flush=True)
 
     if "industry_master" in steps:
         run_sw_industry_master(argparse.Namespace(**vars(_shared_args(args)), src=args.src))

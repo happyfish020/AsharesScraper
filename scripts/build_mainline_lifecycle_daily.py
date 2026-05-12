@@ -84,6 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--replace", action="store_true", help="Replace existing rows in date range")
     parser.add_argument("--output-dir", default=None, help="Override report output directory")
     parser.add_argument("--min-member-count", type=int, default=5, help="Minimum industry member count to consider")
+    parser.add_argument("--chunk-months", type=int, default=1, help="Months per processing chunk (default=1)")
     parser.add_argument("--verbose", action="store_true", help="Verbose logging")
     return parser
 
@@ -119,6 +120,47 @@ def table_exists(engine: Engine, db_name: str, table_name: str) -> bool:
     """
     with engine.connect() as conn:
         return conn.execute(text(sql), {"schema": db_name, "table": table_name}).scalar() > 0
+
+# ---------------------------------------------------------------------------
+# Progress helpers
+# ---------------------------------------------------------------------------
+
+
+def _ts() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def _fmt_seconds(seconds: float | int) -> str:
+    seconds_i = max(0, int(seconds))
+    hours, rem = divmod(seconds_i, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _date_chunks(start: date, end: date, months: int) -> list[tuple[date, date]]:
+    chunks: list[tuple[date, date]] = []
+    cur = start
+    months = max(1, int(months or 1))
+    while cur <= end:
+        next_month = date(
+            cur.year + (cur.month + months - 1) // 12,
+            (cur.month + months - 1) % 12 + 1,
+            1,
+        )
+        chunk_end = min(next_month - timedelta(days=1), end)
+        chunks.append((cur, chunk_end))
+        cur = next_month
+    return chunks
+
+
+def _print_load_result(name: str, df: pd.DataFrame, started_at: float) -> None:
+    print(f"[{_ts()}]   {name:<28} {len(df):>12,} rows ({_fmt_seconds(time.time() - started_at)})")
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -587,232 +629,291 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
         print(f"ERROR: start {start} > end {end}")
         sys.exit(1)
 
-    # Need lookback for delta computation
-    lookback_start = start - timedelta(days=5)
-
     db_password = args.db_password or os.getenv("ASHARE_MYSQL_PASSWORD", "sec_Bobo123")
     engine = build_engine(args.db_host, args.db_port, args.db_user, db_password, args.db_name)
 
-    if verbose:
-        print(f"[INFO] Date range: {start} ~ {end}")
-        print(f"[INFO] Lookback start: {lookback_start}")
-        print(f"[INFO] Database: {args.db_name}")
-        print(f"[INFO] Dry-run: {dry_run}, Replace: {replace}")
+    chunk_months = getattr(args, "chunk_months", 1)
+    chunks = _date_chunks(start, end, chunk_months)
+    n_chunks = len(chunks)
+    overall_t0 = time.time()
 
-    # ── Load input data ─────────────────────────────────────────────
-    if verbose:
-        print("[INFO] Loading cn_ga_mainline_radar_daily (PRIMARY source) ...")
-    radar_df = load_ga_mainline_radar(engine, lookback_start, end)
-    if radar_df.empty:
-        print("WARNING: cn_ga_mainline_radar_daily is empty for the range")
-        return pd.DataFrame()
-    if verbose:
-        print(f"[INFO]   -> {len(radar_df)} rows loaded")
+    print(f"[{_ts()}] Date range: {start} ~ {end} ({n_chunks} chunks, chunk_months={chunk_months})")
+    print(f"[{_ts()}] Database: {args.db_name} | dry_run={dry_run} | replace={replace} | min_member_count={min_member}")
 
-    if verbose:
-        print("[INFO] Loading cn_stock_mainline_strength_daily (secondary strength) ...")
-    stock_strength_df = load_stock_mainline_strength(engine, lookback_start, end)
-    if verbose:
-        print(f"[INFO]   -> {len(stock_strength_df)} rows loaded")
+    all_results: list[pd.DataFrame] = []
 
-    if verbose:
-        print("[INFO] Loading cn_industry_capital_flow_daily ...")
-    capital_flow_df = load_industry_capital_flow(engine, lookback_start, end)
-    if verbose:
-        print(f"[INFO]   -> {len(capital_flow_df)} rows loaded")
+    for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks, 1):
+        chunk_t0 = time.time()
+        lookback_start = chunk_start - timedelta(days=5)
 
-    if verbose:
-        print("[INFO] Loading cn_local_industry_proxy_daily ...")
-    proxy_df = load_industry_proxy(engine, lookback_start, end)
-    if verbose:
-        print(f"[INFO]   -> {len(proxy_df)} rows loaded")
+        print()
+        print(f"[{_ts()}] ── Chunk {chunk_idx}/{n_chunks}: {chunk_start} ~ {chunk_end} ──")
+        print(f"[{_ts()}] Lookback start: {lookback_start}")
+        print(f"[{_ts()}] Loading source tables...")
 
-    if verbose:
-        print("[INFO] Loading cn_ga_market_pulse_daily ...")
-    pulse_df = load_market_pulse(engine, lookback_start, end)
-    if verbose:
-        print(f"[INFO]   -> {len(pulse_df)} rows loaded")
+        t = time.time()
+        radar_df = load_ga_mainline_radar(engine, lookback_start, chunk_end)
+        _print_load_result("radar_df", radar_df, t)
 
-    # ── Merge data ──────────────────────────────────────────────────
-    # Start with radar as base
-    df = radar_df.copy()
-
-    # Merge stock_mainline_strength on trade_date + mainline_id (secondary strength)
-    if not stock_strength_df.empty:
-        stock_str_renamed = stock_strength_df.rename(columns={
-            "industry_id": "mainline_id",
-            "industry_name": "mainline_name_strength",
-            "mainline_strength_score": "mainline_strength",
-        })
-        df = df.merge(
-            stock_str_renamed[[
-                "trade_date", "mainline_id", "mainline_strength",
-                "strength_leader_density", "strength_breakout_ratio",
-                "trend_alignment", "breadth_score", "acceleration_score",
-                "lifecycle_bonus", "rank_in_market", "is_active_mainline",
-            ]],
-            on=["trade_date", "mainline_id"],
-            how="left",
-            suffixes=("", "_strength"),
-        )
-    else:
-        df["mainline_strength"] = np.nan
-        df["strength_leader_density"] = np.nan
-        df["strength_breakout_ratio"] = np.nan
-        df["trend_alignment"] = np.nan
-        df["breadth_score"] = np.nan
-        df["acceleration_score"] = np.nan
-        df["lifecycle_bonus"] = np.nan
-        df["rank_in_market"] = np.nan
-        df["is_active_mainline"] = 0
-
-    # Merge industry_capital_flow on trade_date + mainline_id
-    if not capital_flow_df.empty:
-        cf_renamed = capital_flow_df.rename(columns={
-            "industry_id": "mainline_id",
-            "concentration_score": "concentration_score",
-        })
-        df = df.merge(
-            cf_renamed[[
-                "trade_date", "mainline_id", "total_amount", "total_turnover",
-                "avg_change_pct", "volume_ratio", "market_share",
-                "amount_rank", "flow_strength_score", "rotation_speed_score",
-                "concentration_score", "capital_flow_score",
-            ]],
-            on=["trade_date", "mainline_id"],
-            how="left",
-            suffixes=("", "_cf"),
-        )
-    else:
-        if verbose:
-            print("[INFO] cn_industry_capital_flow_daily is empty, using defaults")
-        df["total_amount"] = 0.0
-        df["total_turnover"] = 0.0
-        df["avg_change_pct"] = 0.0
-        df["volume_ratio"] = 0.0
-        df["market_share"] = 0.0
-        df["amount_rank"] = 0
-        df["flow_strength_score"] = 0.0
-        df["rotation_speed_score"] = 0.0
-        df["concentration_score"] = 0.0
-        df["capital_flow_score"] = 0.0
-
-    # Merge proxy for member_count
-    if not proxy_df.empty:
-        proxy_renamed = proxy_df.rename(columns={
-            "industry_id": "mainline_id",
-        })
-        df = df.merge(
-            proxy_renamed[["trade_date", "mainline_id", "member_count", "top5_concentration"]],
-            on=["trade_date", "mainline_id"],
-            how="left",
-            suffixes=("", "_proxy"),
-        )
-    else:
-        df["member_count"] = 0
-        df["top5_concentration"] = 0.0
-
-    # Filter by min member count
-    df = df[df["member_count"].fillna(0) >= min_member].copy()
-
-    # Build market pulse map
-    market_pulse_map: dict[date, dict[str, Any]] = {}
-    if not pulse_df.empty:
-        for _, p_row in pulse_df.iterrows():
-            td = p_row["trade_date"]
-            if isinstance(td, str):
-                td = datetime.strptime(td, "%Y-%m-%d").date()
-            elif isinstance(td, datetime):
-                td = td.date()
-            market_pulse_map[td] = {
-                "bullish_industry_ratio": p_row.get("bullish_industry_ratio"),
-                "bearish_industry_ratio": p_row.get("bearish_industry_ratio"),
-                "market_score": p_row.get("market_score"),
-                "market_state": p_row.get("market_state"),
-                "market_phase": p_row.get("market_phase"),
-            }
-
-    # ── Sort for sequential processing ──────────────────────────────
-    df = df.sort_values(["mainline_id", "trade_date"]).reset_index(drop=True)
-
-    # ── Compute derived scores ──────────────────────────────────────
-    df["capital_concentration_score"] = df.apply(_compute_capital_concentration_score, axis=1)
-    df["trend_alignment_score"] = df.apply(_compute_trend_alignment_score, axis=1)
-
-    # ── Compute lifecycle state per row ─────────────────────────────
-    results: list[dict[str, Any]] = []
-    prev_by_mainline: dict[str, dict[str, Any]] = {}
-
-    for idx, row in df.iterrows():
-        mainline_id = row["mainline_id"]
-        trade_date_val = row["trade_date"]
-        if isinstance(trade_date_val, str):
-            trade_date_val = datetime.strptime(trade_date_val, "%Y-%m-%d").date()
-        elif isinstance(trade_date_val, datetime):
-            trade_date_val = trade_date_val.date()
-
-        # Skip lookback dates for final output
-        if trade_date_val < start:
-            # Still update prev state
-            prev_by_mainline[mainline_id] = row.to_dict()
+        if radar_df.empty:
+            print(f"[{_ts()}] WARNING: cn_ga_mainline_radar_daily is empty for this chunk, skip")
+            chunk_elapsed = time.time() - chunk_t0
+            print(f"[{_ts()}] Chunk complete in {_fmt_seconds(chunk_elapsed)}")
             continue
 
-        prev_row = prev_by_mainline.get(mainline_id)
-        row_dict = row.to_dict()
-        row_dict["trade_date"] = trade_date_val
+        t = time.time()
+        stock_strength_df = load_stock_mainline_strength(engine, lookback_start, chunk_end)
+        _print_load_result("strength_df", stock_strength_df, t)
 
-        state, score, reason, risk = _compute_lifecycle_state(
-            row_dict, prev_row, market_pulse_map
+        t = time.time()
+        capital_flow_df = load_industry_capital_flow(engine, lookback_start, chunk_end)
+        _print_load_result("capital_flow_df", capital_flow_df, t)
+
+        t = time.time()
+        pulse_df = load_market_pulse(engine, lookback_start, chunk_end)
+        _print_load_result("market_pulse_df", pulse_df, t)
+
+        t = time.time()
+        proxy_df = load_industry_proxy(engine, lookback_start, chunk_end)
+        _print_load_result("proxy_df", proxy_df, t)
+
+        print(f"[{_ts()}] Merging source tables...")
+        merge_t0 = time.time()
+
+        # ── Merge data ──────────────────────────────────────────────────
+        # Start with radar as base
+        df = radar_df.copy()
+
+        # Merge stock_mainline_strength on trade_date + mainline_id (secondary strength)
+        if not stock_strength_df.empty:
+            stock_str_renamed = stock_strength_df.rename(columns={
+                "industry_id": "mainline_id",
+                "industry_name": "mainline_name_strength",
+                "mainline_strength_score": "mainline_strength",
+            })
+            df = df.merge(
+                stock_str_renamed[[
+                    "trade_date", "mainline_id", "mainline_strength",
+                    "strength_leader_density", "strength_breakout_ratio",
+                    "trend_alignment", "breadth_score", "acceleration_score",
+                    "lifecycle_bonus", "rank_in_market", "is_active_mainline",
+                ]],
+                on=["trade_date", "mainline_id"],
+                how="left",
+                suffixes=("", "_strength"),
+            )
+        else:
+            df["mainline_strength"] = np.nan
+            df["strength_leader_density"] = np.nan
+            df["strength_breakout_ratio"] = np.nan
+            df["trend_alignment"] = np.nan
+            df["breadth_score"] = np.nan
+            df["acceleration_score"] = np.nan
+            df["lifecycle_bonus"] = np.nan
+            df["rank_in_market"] = np.nan
+            df["is_active_mainline"] = 0
+
+        # Merge industry_capital_flow on trade_date + mainline_id
+        if not capital_flow_df.empty:
+            cf_renamed = capital_flow_df.rename(columns={
+                "industry_id": "mainline_id",
+                "concentration_score": "concentration_score",
+            })
+            df = df.merge(
+                cf_renamed[[
+                    "trade_date", "mainline_id", "total_amount", "total_turnover",
+                    "avg_change_pct", "volume_ratio", "market_share",
+                    "amount_rank", "flow_strength_score", "rotation_speed_score",
+                    "concentration_score", "capital_flow_score",
+                ]],
+                on=["trade_date", "mainline_id"],
+                how="left",
+                suffixes=("", "_cf"),
+            )
+        else:
+            if verbose:
+                print(f"[{_ts()}] cn_industry_capital_flow_daily is empty, using defaults")
+            df["total_amount"] = 0.0
+            df["total_turnover"] = 0.0
+            df["avg_change_pct"] = 0.0
+            df["volume_ratio"] = 0.0
+            df["market_share"] = 0.0
+            df["amount_rank"] = 0
+            df["flow_strength_score"] = 0.0
+            df["rotation_speed_score"] = 0.0
+            df["concentration_score"] = 0.0
+            df["capital_flow_score"] = 0.0
+
+        # Merge proxy for member_count
+        if not proxy_df.empty:
+            proxy_renamed = proxy_df.rename(columns={
+                "industry_id": "mainline_id",
+            })
+            df = df.merge(
+                proxy_renamed[["trade_date", "mainline_id", "member_count", "top5_concentration"]],
+                on=["trade_date", "mainline_id"],
+                how="left",
+                suffixes=("", "_proxy"),
+            )
+        else:
+            df["member_count"] = 0
+            df["top5_concentration"] = 0.0
+
+        before_filter = len(df)
+        df = df[df["member_count"].fillna(0) >= min_member].copy()
+        print(
+            f"[{_ts()}]   merged_rows={before_filter:,}, "
+            f"after_min_member_filter={len(df):,} ({_fmt_seconds(time.time() - merge_t0)})"
         )
 
-        # Compute rotation_rank per date
-        # (will be recomputed per date group below)
-        results.append({
-            "trade_date": trade_date_val,
-            "mainline_id": mainline_id,
-            "mainline_name": row.get("mainline_name", ""),
-            "mainline_score": row.get("mainline_score"),
-            "mainline_strength": row.get("mainline_strength"),
-            "capital_concentration_score": row_dict.get("capital_concentration_score"),
-            "trend_alignment_score": row_dict.get("trend_alignment_score"),
-            "breakout_ratio": row.get("breakout_ratio"),
-            "new_high_ratio": row.get("new_high_ratio"),
-            "leader_density": row.get("leader_density"),
-            "rotation_rank": row.get("rotation_rank"),
-            "lifecycle_state": state,
-            "lifecycle_score": score,
-            "phase_reason": reason,
-            "risk_flag": risk,
-            "member_count": row.get("member_count", 0),
-            "strong_stock_count": row.get("strong_stock_count", 0),
-        })
+        if df.empty:
+            print(f"[{_ts()}] WARNING: No rows after min_member_count filter, skip chunk")
+            chunk_elapsed = time.time() - chunk_t0
+            print(f"[{_ts()}] Chunk complete in {_fmt_seconds(chunk_elapsed)}")
+            continue
 
-        # Update prev state
-        prev_by_mainline[mainline_id] = row_dict
+        # Build market pulse map
+        market_pulse_map: dict[date, dict[str, Any]] = {}
+        if not pulse_df.empty:
+            for _, p_row in pulse_df.iterrows():
+                td = p_row["trade_date"]
+                if isinstance(td, str):
+                    td = datetime.strptime(td, "%Y-%m-%d").date()
+                elif isinstance(td, datetime):
+                    td = td.date()
+                market_pulse_map[td] = {
+                    "bullish_industry_ratio": p_row.get("bullish_industry_ratio"),
+                    "bearish_industry_ratio": p_row.get("bearish_industry_ratio"),
+                    "market_score": p_row.get("market_score"),
+                    "market_state": p_row.get("market_state"),
+                    "market_phase": p_row.get("market_phase"),
+                }
 
-    if not results:
-        print("WARNING: No results computed")
+        # ── Sort for sequential processing ──────────────────────────────
+        df = df.sort_values(["mainline_id", "trade_date"]).reset_index(drop=True)
+
+        # ── Compute derived scores ──────────────────────────────────────
+        print(f"[{_ts()}] Computing derived scores...")
+        derived_t0 = time.time()
+        df["capital_concentration_score"] = df.apply(_compute_capital_concentration_score, axis=1)
+        df["trend_alignment_score"] = df.apply(_compute_trend_alignment_score, axis=1)
+        print(f"[{_ts()}]   derived scores complete ({_fmt_seconds(time.time() - derived_t0)})")
+
+        # ── Compute lifecycle state per row ─────────────────────────────
+        print(f"[{_ts()}] Computing lifecycle states...")
+        compute_t0 = time.time()
+        results: list[dict[str, Any]] = []
+        prev_by_mainline: dict[str, dict[str, Any]] = {}
+        total_rows = len(df)
+        report_every = max(500, total_rows // 20)
+
+        for idx, row in df.iterrows():
+            mainline_id = row["mainline_id"]
+            trade_date_val = row["trade_date"]
+            if isinstance(trade_date_val, str):
+                trade_date_val = datetime.strptime(trade_date_val, "%Y-%m-%d").date()
+            elif isinstance(trade_date_val, datetime):
+                trade_date_val = trade_date_val.date()
+
+            # Skip lookback dates for final output
+            if trade_date_val < chunk_start:
+                # Still update prev state
+                prev_by_mainline[mainline_id] = row.to_dict()
+                if (idx + 1) % report_every == 0:
+                    pct = int((idx + 1) * 100 / max(total_rows, 1))
+                    print(
+                        f"[{_ts()}]   processed {idx + 1:,} / {total_rows:,} rows ({pct}%) "
+                        f"generated={len(results):,} last_date={trade_date_val}"
+                    )
+                continue
+
+            prev_row = prev_by_mainline.get(mainline_id)
+            row_dict = row.to_dict()
+            row_dict["trade_date"] = trade_date_val
+
+            state, score, reason, risk = _compute_lifecycle_state(
+                row_dict, prev_row, market_pulse_map
+            )
+
+            results.append({
+                "trade_date": trade_date_val,
+                "mainline_id": mainline_id,
+                "mainline_name": row.get("mainline_name", ""),
+                "mainline_score": row.get("mainline_score"),
+                "mainline_strength": row.get("mainline_strength"),
+                "capital_concentration_score": row_dict.get("capital_concentration_score"),
+                "trend_alignment_score": row_dict.get("trend_alignment_score"),
+                "breakout_ratio": row.get("breakout_ratio"),
+                "new_high_ratio": row.get("new_high_ratio"),
+                "leader_density": row.get("leader_density"),
+                "rotation_rank": row.get("rotation_rank"),
+                "lifecycle_state": state,
+                "lifecycle_score": score,
+                "phase_reason": reason,
+                "risk_flag": risk,
+                "member_count": row.get("member_count", 0),
+                "strong_stock_count": row.get("strong_stock_count", 0),
+            })
+
+            # Update prev state
+            prev_by_mainline[mainline_id] = row_dict
+
+            if (idx + 1) % report_every == 0 or (idx + 1) == total_rows:
+                pct = int((idx + 1) * 100 / max(total_rows, 1))
+                elapsed = time.time() - compute_t0
+                eta = (elapsed / max(idx + 1, 1)) * (total_rows - idx - 1)
+                print(
+                    f"[{_ts()}]   processed {idx + 1:,} / {total_rows:,} rows ({pct}%) "
+                    f"generated={len(results):,} last_date={trade_date_val} "
+                    f"eta={_fmt_seconds(eta)}"
+                )
+
+        if not results:
+            print(f"[{_ts()}] WARNING: No results computed for this chunk")
+            chunk_elapsed = time.time() - chunk_t0
+            print(f"[{_ts()}] Chunk complete in {_fmt_seconds(chunk_elapsed)}")
+            continue
+
+        result_df = pd.DataFrame(results)
+
+        # ── Recompute rotation_rank per date based on lifecycle_score ───
+        result_df["rotation_rank"] = (
+            result_df.groupby("trade_date")["lifecycle_score"]
+            .rank(ascending=False, method="min")
+            .fillna(999)
+            .astype(int)
+        )
+
+        # ── Filter to requested chunk date range only ───────────────────
+        result_df = result_df[result_df["trade_date"].between(chunk_start, chunk_end)].copy()
+
+        state_counts = result_df["lifecycle_state"].value_counts().to_dict() if not result_df.empty else {}
+        print(
+            f"[{_ts()}]   Computed {len(result_df):,} rows "
+            f"({result_df['trade_date'].nunique() if not result_df.empty else 0} dates) "
+            f"({_fmt_seconds(time.time() - compute_t0)})"
+        )
+        print(f"[{_ts()}]   State distribution: {state_counts}")
+
+        if not result_df.empty:
+            all_results.append(result_df)
+
+        chunk_elapsed = time.time() - chunk_t0
+        elapsed_total = time.time() - overall_t0
+        avg_chunk = elapsed_total / chunk_idx
+        remaining_est = avg_chunk * (n_chunks - chunk_idx)
+        print(f"[{_ts()}] Chunk complete in {_fmt_seconds(chunk_elapsed)}")
+        print(f"[{_ts()}] Overall elapsed: {_fmt_seconds(elapsed_total)} | ETA remaining: {_fmt_seconds(remaining_est)}")
+
+    if not all_results:
+        print(f"[{_ts()}] WARNING: No results computed")
         return pd.DataFrame()
 
-    result_df = pd.DataFrame(results)
-
-    # ── Recompute rotation_rank per date based on lifecycle_score ───
-    result_df["rotation_rank"] = (
-        result_df.groupby("trade_date")["lifecycle_score"]
-        .rank(ascending=False, method="min")
-        .fillna(999)
-        .astype(int)
-    )
-
-    # ── Filter to requested date range only ─────────────────────────
-    result_df = result_df[result_df["trade_date"].between(start, end)].copy()
-
-    if verbose:
-        state_counts = result_df["lifecycle_state"].value_counts().to_dict()
-        print(f"[INFO] Computed {len(result_df)} rows")
-        print(f"[INFO] State distribution: {state_counts}")
-
-    return result_df
+    final_df = pd.concat(all_results, ignore_index=True)
+    final_df = final_df.drop_duplicates(subset=["trade_date", "mainline_id"], keep="last")
+    print()
+    print(f"[{_ts()}] All chunks complete. Total rows computed: {len(final_df):,}")
+    return final_df
 
 
 # ---------------------------------------------------------------------------
@@ -829,18 +930,25 @@ def write_to_db(
     verbose: bool,
 ) -> int:
     """Write computed DataFrame to cn_mainline_lifecycle_daily. Returns row count."""
+    table_name = "cn_mainline_lifecycle_daily"
+
     if df.empty:
-        print("WARNING: No data to write")
+        print(f"[{_ts()}] WARNING: No data to write")
         return 0
 
+    print(f"[{_ts()}] Writing to DB: {table_name} ({len(df):,} rows)")
+    write_t0 = time.time()
+
     if dry_run:
-        print(f"[DRY-RUN] Would write {len(df)} rows to cn_mainline_lifecycle_daily")
+        print(f"[{_ts()}] [DRY-RUN] would write {len(df):,} rows to {table_name}")
         return len(df)
 
     # Ensure table exists
-    if not table_exists(engine, db_name, "cn_mainline_lifecycle_daily"):
-        print("ERROR: cn_mainline_lifecycle_daily table does not exist. Run DDL first.")
+    t = time.time()
+    if not table_exists(engine, db_name, table_name):
+        print(f"[{_ts()}] ERROR: {table_name} table does not exist. Run DDL first.")
         return 0
+    print(f"[{_ts()}]   table check OK ({_fmt_seconds(time.time() - t)})")
 
     # If replace, delete existing rows in date range
     if replace:
@@ -854,14 +962,16 @@ def write_to_db(
             max_date = datetime.strptime(max_date, "%Y-%m-%d").date()
         elif isinstance(max_date, datetime):
             max_date = max_date.date()
+
+        print(f"[{_ts()}]   deleting existing rows in [{min_date}, {max_date}] ...")
+        t = time.time()
         del_sql = """
         DELETE FROM cn_mainline_lifecycle_daily
         WHERE trade_date BETWEEN :start AND :end
         """
         with engine.begin() as conn:
             deleted = conn.execute(text(del_sql), {"start": min_date, "end": max_date}).rowcount
-        if verbose:
-            print(f"[INFO] Deleted {deleted} existing rows in [{min_date}, {max_date}]")
+        print(f"[{_ts()}]   deleted {deleted:,} rows ({_fmt_seconds(time.time() - t)})")
 
     # Prepare rows for upsert
     columns = [
@@ -901,24 +1011,33 @@ def write_to_db(
         updated_at = CURRENT_TIMESTAMP
     """
 
-    # Convert dates to string for SQL
+    print(f"[{_ts()}]   preparing rows...")
+    t = time.time()
     write_df = df[columns].copy()
     write_df["trade_date"] = write_df["trade_date"].apply(
         lambda d: d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
     )
-
     rows = write_df.astype(object).where(pd.notna(write_df), None).to_dict(orient="records")
+    print(f"[{_ts()}]   prepared {len(rows):,} rows ({_fmt_seconds(time.time() - t)})")
 
     total = 0
     batch_size = 4000
+    n_batches = (len(rows) + batch_size - 1) // batch_size
     with engine.begin() as conn:
-        for i in range(0, len(rows), batch_size):
+        for batch_idx, i in enumerate(range(0, len(rows), batch_size), 1):
+            batch_t0 = time.time()
             batch = rows[i : i + batch_size]
             conn.execute(text(upsert_sql), batch)
             total += len(batch)
-        if verbose:
-            print(f"[INFO] Wrote {total} rows to cn_mainline_lifecycle_daily")
+            elapsed = time.time() - write_t0
+            eta = (elapsed / max(total, 1)) * (len(rows) - total)
+            print(
+                f"[{_ts()}]   wrote batch {batch_idx}/{n_batches}: "
+                f"{total:,}/{len(rows):,} rows "
+                f"({ _fmt_seconds(time.time() - batch_t0) }) eta={_fmt_seconds(eta)}"
+            )
 
+    print(f"[{_ts()}]   Wrote {total:,} rows ({_fmt_seconds(time.time() - write_t0)})")
     return total
 
 

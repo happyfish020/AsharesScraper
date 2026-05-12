@@ -48,6 +48,83 @@ from data_pipeline.common.state import BackfillState
 from data_pipeline.tushare.client import TushareClient, resolve_tushare_token
 
 
+
+# ---------------------------------------------------------------------------
+# Source data coverage audit
+# ---------------------------------------------------------------------------
+
+def _table_exists_for_audit(engine, table_name: str) -> bool:
+    with engine.connect() as conn:
+        return bool(
+            conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM INFORMATION_SCHEMA.TABLES
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = :table_name
+                    """
+                ),
+                {"table_name": table_name},
+            ).scalar()
+        )
+
+
+def _parse_audit_date(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def audit_source_data_coverage(engine, start: date, end: date, logger) -> None:
+    """
+    This builder can fall back to Tushare, but if cn_board_member_map_d is present
+    it must cover the requested input range. Missing DB source is logged as fallback,
+    not a hard failure.
+    """
+    table_name = "cn_board_member_map_d"
+    date_col = "trade_date"
+    logger.info("source_audit_start required_range=%s~%s", start, end)
+
+    if not _table_exists_for_audit(engine, table_name):
+        logger.warning("source_audit table=%s status=MISSING_TABLE action=tushare_fallback", table_name)
+        return
+
+    sql = f"""
+        SELECT COUNT(*) AS row_count,
+               MIN({date_col}) AS min_date,
+               MAX({date_col}) AS max_date
+        FROM {table_name}
+        WHERE {date_col} BETWEEN :start AND :end
+          AND {date_col} IS NOT NULL
+    """
+    with engine.connect() as conn:
+        row = conn.execute(text(sql), {"start": start, "end": end}).mappings().first()
+
+    row_count = int((row or {}).get("row_count") or 0)
+    min_date = _parse_audit_date((row or {}).get("min_date"))
+    max_date = _parse_audit_date((row or {}).get("max_date"))
+
+    logger.info("source_audit table=%s rows=%s range=%s~%s", table_name, row_count, min_date, max_date)
+
+    if row_count <= 0:
+        logger.warning("source_audit table=%s status=NO_ROWS action=tushare_fallback", table_name)
+        return
+    if min_date is None or max_date is None or min_date > start or max_date < end:
+        logger.error("SOURCE DATA AUDIT FAILED")
+        logger.error("- %s.%s: available=%s~%s, required=%s~%s", table_name, date_col, min_date, max_date, start, end)
+        raise SystemExit(2)
+
+    logger.info("source_audit_pass")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -341,6 +418,7 @@ def main() -> None:
     date_range = resolve_date_range(args.start, args.end)
     logger = build_logger("build_local_industry_map_hist")
     engine = build_engine()
+    audit_source_data_coverage(engine, date_range.start, date_range.end, logger)
 
     # Ensure DDL
     logger.info("Ensuring cn_local_industry_map_hist table exists")

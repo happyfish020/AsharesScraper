@@ -353,6 +353,98 @@ def _compute_strong_stock_count(
     return int(industry_group[leader_score_col].apply(lambda x: _safe_float(x) >= threshold).sum())
 
 
+
+# ---------------------------------------------------------------------------
+# Source data coverage preflight
+# ---------------------------------------------------------------------------
+
+REQUIRED_SOURCE_TABLES = [
+    ("cn_ga_mainline_radar_daily", "trade_date"),
+    ("cn_stock_leader_score_daily", "trade_date"),
+    ("cn_ga_stock_role_map_daily", "trade_date"),
+    ("cn_stock_daily_price", "TRADE_DATE"),
+    ("cn_stock_daily_basic", "trade_date"),
+]
+
+OPTIONAL_SOURCE_TABLES = [
+    ("cn_industry_capital_flow_daily", "trade_date"),
+]
+
+
+def _normalize_audit_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def audit_source_data_coverage(engine: Engine, start: date, end: date, db_name: str) -> None:
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Source data coverage audit start: {start} ~ {end}", flush=True)
+    failures: list[str] = []
+
+    for table_name, date_col in REQUIRED_SOURCE_TABLES + OPTIONAL_SOURCE_TABLES:
+        required = (table_name, date_col) in REQUIRED_SOURCE_TABLES
+
+        if not table_exists(engine, db_name, table_name):
+            status = "MISSING_TABLE"
+            print(f"[AUDIT] table={table_name} status={status} required={required}", flush=True)
+            if required:
+                failures.append(f"- {table_name}: {status}")
+            continue
+
+        sql = f"""
+            SELECT COUNT(*) AS row_count,
+                   MIN({date_col}) AS min_date,
+                   MAX({date_col}) AS max_date
+            FROM {table_name}
+            WHERE {date_col} BETWEEN :start AND :end
+              AND {date_col} IS NOT NULL
+        """
+        with engine.connect() as conn:
+            row = conn.execute(text(sql), {"start": start, "end": end}).mappings().first()
+
+        row_count = int((row or {}).get("row_count") or 0)
+        min_date = _normalize_audit_date((row or {}).get("min_date"))
+        max_date = _normalize_audit_date((row or {}).get("max_date"))
+
+        status = "OK"
+        reason = ""
+        if row_count <= 0:
+            status = "NO_ROWS"
+            reason = "no rows in requested range"
+        elif min_date is None or max_date is None:
+            status = "INVALID_DATES"
+            reason = "min/max date is NULL"
+        elif min_date > start or max_date < end:
+            status = "RANGE_NOT_COVERED"
+            reason = f"available={min_date}~{max_date}, required={start}~{end}"
+
+        print(
+            f"[AUDIT] table={table_name} date_col={date_col} rows={row_count:,} "
+            f"range={min_date}~{max_date} status={status} required={required}",
+            flush=True,
+        )
+
+        if required and status != "OK":
+            failures.append(f"- {table_name}.{date_col}: {status} | {reason}")
+
+    if failures:
+        print("=" * 60, flush=True)
+        print("[SOURCE DATA AUDIT FAILED]", flush=True)
+        for item in failures:
+            print(item, flush=True)
+        print("=" * 60, flush=True)
+        sys.exit(2)
+
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Source data coverage audit PASS", flush=True)
+
+
 # ---------------------------------------------------------------------------
 # Main build logic
 # ---------------------------------------------------------------------------
@@ -376,6 +468,8 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
 
     db_password = args.db_password or os.getenv("ASHARE_MYSQL_PASSWORD", "sec_Bobo123")
     engine = build_engine(args.db_host, args.db_port, args.db_user, db_password, args.db_name)
+
+    audit_source_data_coverage(engine, start, end, args.db_name)
 
     if verbose:
         print(f"[INFO] Date range: {start} ~ {end}")

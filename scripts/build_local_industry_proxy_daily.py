@@ -246,6 +246,117 @@ ON DUPLICATE KEY UPDATE
 """
 
 
+
+# ---------------------------------------------------------------------------
+# Source data coverage audit
+# ---------------------------------------------------------------------------
+
+REQUIRED_SOURCE_TABLES = [
+    ("cn_local_industry_map_hist", "in_date"),
+    ("cn_stock_daily_price", "TRADE_DATE"),
+    ("cn_stock_daily_basic", "trade_date"),
+]
+
+OPTIONAL_SOURCE_TABLES = [
+    ("cn_stock_leader_score_daily", "trade_date"),
+]
+
+
+def _parse_audit_date(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _table_exists_for_audit(engine, table_name: str) -> bool:
+    with engine.connect() as conn:
+        return bool(
+            conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM INFORMATION_SCHEMA.TABLES
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = :table_name
+                    """
+                ),
+                {"table_name": table_name},
+            ).scalar()
+        )
+
+
+def _audit_table_range(engine, table_name: str, date_col: str, start: date, end: date, required: bool, logger) -> list[str]:
+    failures: list[str] = []
+    if not _table_exists_for_audit(engine, table_name):
+        status = "MISSING_TABLE"
+        logger.error("source_audit table=%s status=%s required=%s", table_name, status, required)
+        if required:
+            failures.append(f"- {table_name}: {status}")
+        return failures
+
+    sql = f"""
+        SELECT COUNT(*) AS row_count,
+               MIN({date_col}) AS min_date,
+               MAX({date_col}) AS max_date
+        FROM {table_name}
+        WHERE {date_col} IS NOT NULL
+    """
+    with engine.connect() as conn:
+        row = conn.execute(text(sql)).mappings().first()
+
+    row_count = int((row or {}).get("row_count") or 0)
+    min_date = _parse_audit_date((row or {}).get("min_date"))
+    max_date = _parse_audit_date((row or {}).get("max_date"))
+
+    status = "OK"
+    reason = ""
+    if row_count <= 0 or min_date is None or max_date is None:
+        status = "NO_DATA"
+        reason = "empty or invalid date range"
+    elif max_date < start:
+        status = "RANGE_NOT_COVERED"
+        reason = f"available={min_date}~{max_date}, required_through={end}"
+    elif table_name != "cn_local_industry_map_hist" and (min_date > start or max_date < end):
+        status = "RANGE_NOT_COVERED"
+        reason = f"available={min_date}~{max_date}, required={start}~{end}"
+
+    logger.info(
+        "source_audit table=%s date_col=%s rows=%s range=%s~%s status=%s required=%s",
+        table_name, date_col, row_count, min_date, max_date, status, required,
+    )
+    if required and status != "OK":
+        failures.append(f"- {table_name}.{date_col}: {status} | {reason}")
+    return failures
+
+
+def audit_source_data_coverage(engine, start: date, end: date, logger, use_leader_score: bool = False) -> None:
+    logger.info("source_audit_start required_range=%s~%s", start, end)
+    failures: list[str] = []
+    for table_name, date_col in REQUIRED_SOURCE_TABLES:
+        failures.extend(_audit_table_range(engine, table_name, date_col, start, end, True, logger))
+
+    if use_leader_score:
+        for table_name, date_col in OPTIONAL_SOURCE_TABLES:
+            failures.extend(_audit_table_range(engine, table_name, date_col, start, end, True, logger))
+    else:
+        for table_name, date_col in OPTIONAL_SOURCE_TABLES:
+            _audit_table_range(engine, table_name, date_col, start, end, False, logger)
+
+    if failures:
+        logger.error("SOURCE DATA AUDIT FAILED")
+        for item in failures:
+            logger.error(item)
+        raise SystemExit(2)
+    logger.info("source_audit_pass")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -298,6 +409,7 @@ def main() -> None:
     date_range = resolve_date_range(args.start, args.end)
     logger = build_logger("build_local_industry_proxy_daily")
     engine = build_engine()
+    audit_source_data_coverage(engine, date_range.start, date_range.end, logger, args.use_leader_score)
 
     # Ensure DDL — use CREATE TABLE IF NOT EXISTS for initial creation,
     # then ALTER ADD COLUMN for any columns that may be missing from an

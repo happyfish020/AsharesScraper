@@ -94,6 +94,51 @@ The engine produces:
 - `weak_factors` — Bottom 3 detracting factors (lowest scores, < 0.5)
 - `flags` — Risk flags, lifecycle state, alpha tier
 
+## Full Build Order (P1 Backfill)
+
+When rebuilding from scratch (e.g., 2010–2026), run in this order:
+
+```powershell
+# Step 1: Capital flow (no dependencies on GA tables)
+python scripts/build_industry_capital_flow_daily.py `
+    --start 2010-01-01 --end 2026-03-31 `
+    --db-user cn_opr_red --db-password sec_Bobo123 `
+    --db-name cn_market_red --replace
+
+# Step 2: Mainline strength (can run in parallel with Step 1)
+python scripts/build_cn_stock_mainline_strength_daily.py `
+    --start 2010-01-01 --end 2026-03-31 `
+    --db-user cn_opr_red --db-password sec_Bobo123 `
+    --db-name cn_market_red --replace
+
+# Step 3: GA stock role map (depends only on cn_stock_leader_score_daily)
+python scripts/build_ga_stock_role_map_daily.py `
+    --start 2010-01-01 --end 2026-03-31 `
+    --db-user cn_opr_red --db-password sec_Bobo123 `
+    --db-name cn_market_red --replace
+
+# Step 4: GA mainline radar (depends on steps 2+3 + price data)
+python scripts/build_ga_mainline_radar_daily.py `
+    --start 2010-01-01 --end 2026-03-31 `
+    --db-user cn_opr_red --db-password sec_Bobo123 `
+    --db-name cn_market_red --replace
+
+# Step 5: GA market pulse (depends on step 4 + index data)
+python scripts/build_ga_market_pulse_daily.py `
+    --start 2010-01-01 --end 2026-03-31 `
+    --db-user cn_opr_red --db-password sec_Bobo123 `
+    --db-name cn_market_red --replace
+
+# Step 6: Rebuild unified alpha scores
+python scripts/build_unified_alpha_score_daily.py `
+    --start 2026-01-01 --end 2026-03-31 `
+    --db-name cn_market_red --replace
+```
+
+**Parallelism**: Steps 1+2 can run simultaneously. Steps 3/4/5 must be sequential.
+
+---
+
 ## CLI Usage
 
 ### Build cn_stock_quality_score_daily
@@ -201,7 +246,12 @@ The validation script (`scripts/validate_unified_alpha_score_daily.py`) performs
 |------|-------------|
 | `sql/create_stock_quality_score_daily.sql` | DDL for cn_stock_quality_score_daily table |
 | `sql/create_unified_alpha_score_daily.sql` | DDL for cn_unified_alpha_score_daily table |
+| `scripts/build_industry_capital_flow_daily.py` | Step 1: Capital flow builder |
+| `scripts/build_cn_stock_mainline_strength_daily.py` | Step 2: Mainline strength builder |
+| `scripts/build_ga_stock_role_map_daily.py` | Step 3: GA stock role map builder |
+| `scripts/build_ga_mainline_radar_daily.py` | Step 4: GA mainline radar builder |
+| `scripts/build_ga_market_pulse_daily.py` | Step 5: GA market pulse builder |
 | `scripts/build_stock_quality_score_daily.py` | Builder for stock quality scores |
-| `scripts/build_unified_alpha_score_daily.py` | Builder for unified alpha scores |
+| `scripts/build_unified_alpha_score_daily.py` | Step 6: Builder for unified alpha scores |
 | `scripts/validate_unified_alpha_score_daily.py` | Validation script |
 | `docs/UNIFIED_ALPHA_ENGINE.md` | This documentation |

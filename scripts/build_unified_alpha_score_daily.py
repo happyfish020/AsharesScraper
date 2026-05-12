@@ -107,6 +107,43 @@ BUCKET_THRESHOLDS: dict[str, float] = {
 
 REPORT_DIR = Path("reports") / "unified_alpha"
 
+
+def _ts() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def _fmt_seconds(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m {seconds}s"
+
+
+def _progress_line(label: str, current: int, total: int, started_at: float, extra: str = "") -> None:
+    if total <= 0:
+        return
+    elapsed = time.time() - started_at
+    pct = current * 100 // total
+    eta = (elapsed / current * (total - current)) if current > 0 else 0.0
+    suffix = f" | {extra}" if extra else ""
+    print(
+        f"[{_ts()}]   {label}: {current:,}/{total:,} ({pct}%) "
+        f"elapsed={_fmt_seconds(elapsed)} eta={_fmt_seconds(eta)}{suffix}",
+        flush=True,
+    )
+
+
+def _timed_load(label: str, loader, *args, **kwargs) -> pd.DataFrame:
+    t0 = time.time()
+    print(f"[{_ts()}]   Loading {label} ...", flush=True)
+    df = loader(*args, **kwargs)
+    print(f"[{_ts()}]   {label:<30} {len(df):>12,} rows ({_fmt_seconds(time.time() - t0)})", flush=True)
+    return df
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -127,6 +164,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--replace", action="store_true", help="Replace existing rows in date range")
     parser.add_argument("--output-dir", default=None, help="Override report output directory")
     parser.add_argument("--verbose", action="store_true", help="Verbose logging")
+    parser.add_argument(
+        "--chunk-months",
+        type=int,
+        default=3,
+        help="Process output date range in chunks to avoid loading full source tables at once",
+    )
+    parser.add_argument(
+        "--no-report",
+        action="store_true",
+        help="Skip report generation for large chunked builds",
+    )
     return parser
 
 
@@ -778,107 +826,109 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
     db_password = args.db_password or os.getenv("ASHARE_MYSQL_PASSWORD", "sec_Bobo123")
     engine = build_engine(args.db_host, args.db_port, args.db_user, db_password, args.db_name)
 
-    print(f"[Build] Loading data for {start} ~ {end} ...")
+    build_started_at = time.time()
+    print(f"[{_ts()}] Date range: {start} ~ {end}", flush=True)
+    print(f"[{_ts()}] Database: {args.db_name} | dry_run={args.dry_run} | replace={args.replace}", flush=True)
 
     # ── Load all source data ──────────────────────────────────────────
-    print("  Loading stock_quality_scores ...")
-    quality_df = load_stock_quality_scores(engine, start, end)
-    if verbose:
-        print(f"    -> {len(quality_df)} rows")
-
-    print("  Loading mainline_strength ...")
-    ms_df = load_mainline_strength(engine, start, end)
-    if verbose:
-        print(f"    -> {len(ms_df)} rows")
-
-    print("  Loading ga_mainline_radar ...")
-    radar_df = load_ga_mainline_radar(engine, start, end)
-    if verbose:
-        print(f"    -> {len(radar_df)} rows")
-
-    print("  Loading industry_capital_flow ...")
-    icf_df = load_industry_capital_flow(engine, start, end)
-    if verbose:
-        print(f"    -> {len(icf_df)} rows")
-
-    print("  Loading ga_stock_role_map ...")
-    role_df = load_ga_stock_role_map(engine, start, end)
-    if verbose:
-        print(f"    -> {len(role_df)} rows")
-
-    print("  Loading cn_stock_daily_price ...")
-    price_df = load_stock_daily_price(engine, start, end)
-    if verbose:
-        print(f"    -> {len(price_df)} rows")
-
-    print("  Loading mainline_lifecycle ...")
-    lc_df = load_mainline_lifecycle(engine, start, end)
-    if verbose:
-        print(f"    -> {len(lc_df)} rows")
-
-    print("  Loading ga_market_pulse ...")
-    pulse_df = load_ga_market_pulse(engine, start, end)
-    if verbose:
-        print(f"    -> {len(pulse_df)} rows")
-
-    print("  Loading industry_map ...")
-    ind_map_df = load_industry_map(engine)
-    if verbose:
-        print(f"    -> {len(ind_map_df)} rows")
+    print(f"[{_ts()}] Loading source tables ...", flush=True)
+    quality_df = _timed_load("stock_quality_scores", load_stock_quality_scores, engine, start, end)
+    ms_df = _timed_load("mainline_strength", load_mainline_strength, engine, start, end)
+    radar_df = _timed_load("ga_mainline_radar", load_ga_mainline_radar, engine, start, end)
+    icf_df = _timed_load("industry_capital_flow", load_industry_capital_flow, engine, start, end)
+    role_df = _timed_load("ga_stock_role_map", load_ga_stock_role_map, engine, start, end)
+    price_df = _timed_load("cn_stock_daily_price", load_stock_daily_price, engine, start, end)
+    lc_df = _timed_load("mainline_lifecycle", load_mainline_lifecycle, engine, start, end)
+    pulse_df = _timed_load("ga_market_pulse", load_ga_market_pulse, engine, start, end)
+    ind_map_df = _timed_load("industry_map", load_industry_map, engine)
 
     # ── Build lookup maps for fast access ─────────────────────────────
-    print("  Building lookup maps ...")
+    lookup_started_at = time.time()
+    print(f"[{_ts()}] Building lookup maps ...", flush=True)
 
     # Mainline strength lookup: industry_name -> row (industry-level)
     ms_lookup: dict[str, dict] = {}
     if not ms_df.empty:
-        for _, row in ms_df.iterrows():
+        total = len(ms_df)
+        report_every = max(5000, total // 10 or 1)
+        for i, (_, row) in enumerate(ms_df.iterrows(), 1):
             ms_lookup[row["industry_name"]] = row.to_dict()
+            if i % report_every == 0 or i == total:
+                _progress_line("mainline strength lookup", i, total, lookup_started_at)
 
     # Radar lookup: (trade_date, mainline_id) -> row
     radar_lookup: dict[tuple[date, str], dict] = {}
     if not radar_df.empty:
-        for _, row in radar_df.iterrows():
+        total = len(radar_df)
+        report_every = max(5000, total // 10 or 1)
+        for i, (_, row) in enumerate(radar_df.iterrows(), 1):
             radar_lookup[(row["trade_date"], row["mainline_id"])] = row.to_dict()
+            if i % report_every == 0 or i == total:
+                _progress_line("radar lookup", i, total, lookup_started_at)
 
     # Industry capital flow lookup: (trade_date, industry_id) -> row
     icf_lookup: dict[tuple[date, str], dict] = {}
     if not icf_df.empty:
-        for _, row in icf_df.iterrows():
+        total = len(icf_df)
+        report_every = max(5000, total // 10 or 1)
+        for i, (_, row) in enumerate(icf_df.iterrows(), 1):
             icf_lookup[(row["trade_date"], row["industry_id"])] = row.to_dict()
+            if i % report_every == 0 or i == total:
+                _progress_line("capital flow lookup", i, total, lookup_started_at)
 
     # Role lookup: (trade_date, symbol) -> row (from cn_ga_stock_role_map_daily)
     role_lookup: dict[tuple[date, str], dict] = {}
     if not role_df.empty:
-        for _, row in role_df.iterrows():
+        total = len(role_df)
+        report_every = max(5000, total // 10 or 1)
+        for i, (_, row) in enumerate(role_df.iterrows(), 1):
             role_lookup[(row["trade_date"], row["symbol"])] = row.to_dict()
+            if i % report_every == 0 or i == total:
+                _progress_line("role lookup", i, total, lookup_started_at)
 
     # Price lookup: (TRADE_DATE, SYMBOL) -> row (UPPERCASE columns per P0)
     price_lookup: dict[tuple[date, str], dict] = {}
     if not price_df.empty:
-        for _, row in price_df.iterrows():
+        total = len(price_df)
+        report_every = max(5000, total // 10 or 1)
+        for i, (_, row) in enumerate(price_df.iterrows(), 1):
             price_lookup[(row["TRADE_DATE"], row["SYMBOL"])] = row.to_dict()
+            if i % report_every == 0 or i == total:
+                _progress_line("price lookup", i, total, lookup_started_at)
 
     # Lifecycle lookup: (trade_date, mainline_id) -> row
     lc_lookup: dict[tuple[date, str], dict] = {}
     if not lc_df.empty:
-        for _, row in lc_df.iterrows():
+        total = len(lc_df)
+        report_every = max(5000, total // 10 or 1)
+        for i, (_, row) in enumerate(lc_df.iterrows(), 1):
             lc_lookup[(row["trade_date"], row["mainline_id"])] = row.to_dict()
+            if i % report_every == 0 or i == total:
+                _progress_line("lifecycle lookup", i, total, lookup_started_at)
 
     # Market pulse lookup: trade_date -> row
     pulse_lookup: dict[date, dict] = {}
     if not pulse_df.empty:
-        for _, row in pulse_df.iterrows():
+        total = len(pulse_df)
+        report_every = max(5000, total // 10 or 1)
+        for i, (_, row) in enumerate(pulse_df.iterrows(), 1):
             pulse_lookup[row["trade_date"]] = row.to_dict()
+            if i % report_every == 0 or i == total:
+                _progress_line("pulse lookup", i, total, lookup_started_at)
 
     # Industry map lookup: symbol -> (industry_id, industry_name)
     ind_map_lookup: dict[str, tuple[str, str]] = {}
     if not ind_map_df.empty:
-        for _, row in ind_map_df.iterrows():
+        total = len(ind_map_df)
+        report_every = max(5000, total // 10 or 1)
+        for i, (_, row) in enumerate(ind_map_df.iterrows(), 1):
             ind_map_lookup[row["symbol"]] = (
                 row.get("industry_id", ""),
                 row.get("industry_name", ""),
             )
+            if i % report_every == 0 or i == total:
+                _progress_line("industry map lookup", i, total, lookup_started_at)
+    print(f"[{_ts()}] Lookup maps ready in {_fmt_seconds(time.time() - lookup_started_at)}", flush=True)
 
     # ── Determine base universe ──────────────────────────────────────
     if quality_df.empty:
@@ -891,14 +941,15 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
         print("[ERROR] No base data available. Cannot compute unified alpha scores.")
         return pd.DataFrame()
 
-    print(f"  Base universe: {base_df['symbol'].nunique()} symbols across {base_df['trade_date'].nunique()} dates")
+    print(f"[{_ts()}] Base universe: {base_df['symbol'].nunique():,} symbols across {base_df['trade_date'].nunique():,} dates", flush=True)
 
     # ── Compute factors for each row ──────────────────────────────────
     results: list[dict[str, Any]] = []
     total_rows = len(base_df)
     batch_size = max(1, total_rows // 20)
 
-    print(f"  Computing factors for {total_rows} rows ...")
+    compute_started_at = time.time()
+    print(f"[{_ts()}] Computing factors for {total_rows:,} rows ...", flush=True)
 
     for idx, (_, row) in enumerate(base_df.iterrows()):
         trade_date = row["trade_date"]
@@ -1012,7 +1063,7 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
         # Progress
         if (idx + 1) % batch_size == 0 or idx == total_rows - 1:
             pct = (idx + 1) / total_rows * 100
-            print(f"    Progress: {idx + 1}/{total_rows} ({pct:.0f}%)")
+            _progress_line("factor rows", idx + 1, total_rows, compute_started_at, f"output={len(results):,}")
 
     # ── Convert to DataFrame ──────────────────────────────────────────
     result_df = pd.DataFrame(results)
@@ -1020,12 +1071,16 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
         print("[WARNING] No results computed.")
         return result_df
 
-    print(f"  Computed {len(result_df)} rows.")
+    print(f"[{_ts()}] Factor computation complete: {len(result_df):,} rows ({_fmt_seconds(time.time() - compute_started_at)})", flush=True)
 
     # ── Assign alpha buckets (cross-sectional per trade_date) ─────────
-    print("  Assigning alpha buckets ...")
+    bucket_started_at = time.time()
+    print(f"[{_ts()}] Assigning alpha buckets ...", flush=True)
     result_df["alpha_bucket"] = "NEUTRAL"
-    for dt, group in result_df.groupby("trade_date"):
+    date_groups = list(result_df.groupby("trade_date"))
+    total_date_groups = len(date_groups)
+    report_every = max(20, total_date_groups // 10 or 1)
+    for i, (dt, group) in enumerate(date_groups, 1):
         scores = group["final_score"].tolist()
         bucket_map = {}
         for _, row in group.iterrows():
@@ -1033,15 +1088,20 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
             bucket_map[row["symbol"]] = bucket
         mask = result_df["trade_date"] == dt
         result_df.loc[mask, "alpha_bucket"] = result_df.loc[mask, "symbol"].map(bucket_map)
+        if i % report_every == 0 or i == total_date_groups:
+            _progress_line("bucket dates", i, total_date_groups, bucket_started_at)
 
     # ── Generate explanations ─────────────────────────────────────────
-    print("  Generating explanations ...")
+    explain_started_at = time.time()
+    print(f"[{_ts()}] Generating explanations ...", flush=True)
     explanations = []
     top_factors_list = []
     weak_factors_list = []
     flags_list = []
 
-    for _, row in result_df.iterrows():
+    total_explain_rows = len(result_df)
+    report_every = max(5000, total_explain_rows // 20 or 1)
+    for i, (_, row) in enumerate(result_df.iterrows(), 1):
         factor_scores = row["factor_scores"]
         if isinstance(factor_scores, str):
             factor_scores = json.loads(factor_scores)
@@ -1059,6 +1119,8 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
         top_factors_list.append(top_f)
         weak_factors_list.append(weak_f)
         flags_list.append(flags)
+        if i % report_every == 0 or i == total_explain_rows:
+            _progress_line("explanations", i, total_explain_rows, explain_started_at)
 
     result_df["explanation"] = explanations
     result_df["top_factors"] = top_factors_list
@@ -1069,8 +1131,8 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
     result_df = result_df.drop(columns=["factor_scores", "_mainline_id", "_mainline_name", "_stock_role",
                                          "fundamental_risk_flag"], errors="ignore")
 
-    print(f"  Build complete: {len(result_df)} rows, {result_df['trade_date'].nunique()} dates, "
-          f"{result_df['symbol'].nunique()} symbols")
+    print(f"[{_ts()}] Build complete: {len(result_df):,} rows, {result_df['trade_date'].nunique():,} dates, "
+          f"{result_df['symbol'].nunique():,} symbols ({_fmt_seconds(time.time() - build_started_at)})", flush=True)
 
     return result_df
 
@@ -1126,11 +1188,14 @@ def write_to_db(
     write_df = write_df.where(pd.notna(write_df), None)
 
     if dry_run:
-        print(f"[Dry-run] Would write {len(write_df)} rows to {db_name}.{table_name}")
+        print(f"[{_ts()}] [Dry-run] Would write {len(write_df):,} rows to {db_name}.{table_name}", flush=True)
         if verbose:
             print(f"  Sample rows:")
             print(f"  {write_df.head(3).to_string()}")
         return len(write_df)
+
+    write_started_at = time.time()
+    print(f"[{_ts()}] Writing to DB: {db_name}.{table_name} rows={len(write_df):,}", flush=True)
 
     if replace:
         date_min = write_df["trade_date"].min()
@@ -1138,7 +1203,7 @@ def write_to_db(
         del_sql = text(f"DELETE FROM {table_name} WHERE trade_date BETWEEN :start AND :end")
         with engine.begin() as conn:
             deleted = conn.execute(del_sql, {"start": date_min, "end": date_max}).rowcount
-        print(f"[Write] Deleted {deleted} existing rows in [{date_min} ~ {date_max}]")
+        print(f"[{_ts()}]   Deleted {deleted:,} existing rows in [{date_min} ~ {date_max}]", flush=True)
 
     # Build upsert SQL
     col_list = ", ".join(columns)
@@ -1162,8 +1227,9 @@ def write_to_db(
             batch = rows[i : i + batch_size]
             conn.execute(text(upsert_sql), batch)
             total += len(batch)
+            _progress_line("DB write", total, len(rows), write_started_at)
 
-    print(f"[Write] Wrote {total} rows to {db_name}.{table_name}")
+    print(f"[{_ts()}] DB write complete: {total:,} rows ({_fmt_seconds(time.time() - write_started_at)})", flush=True)
     return total
 
 
@@ -1270,6 +1336,206 @@ def generate_reports(
     return str(csv_path), str(md_path)
 
 
+
+
+def _date_chunks(start: date, end: date, months: int) -> list[tuple[date, date]]:
+    """Split [start, end] into month-based chunks."""
+    if months <= 0:
+        months = 3
+    chunks: list[tuple[date, date]] = []
+    cur = start
+    while cur <= end:
+        next_month = date(
+            cur.year + (cur.month + months - 1) // 12,
+            (cur.month + months - 1) % 12 + 1,
+            1,
+        )
+        chunk_end = min(next_month - timedelta(days=1), end)
+        chunks.append((cur, chunk_end))
+        cur = next_month
+    return chunks
+
+
+
+
+# ---------------------------------------------------------------------------
+# Source data coverage preflight
+# ---------------------------------------------------------------------------
+
+REQUIRED_SOURCE_TABLES: list[dict[str, str]] = [
+    {"table": "cn_stock_quality_score_daily", "date_col": "trade_date", "label": "stock_quality_scores"},
+    {"table": "cn_stock_mainline_strength_daily", "date_col": "trade_date", "label": "mainline_strength"},
+    {"table": "cn_ga_mainline_radar_daily", "date_col": "trade_date", "label": "ga_mainline_radar"},
+    {"table": "cn_ga_stock_role_map_daily", "date_col": "trade_date", "label": "ga_stock_role_map"},
+    {"table": "cn_stock_daily_price", "date_col": "TRADE_DATE", "label": "cn_stock_daily_price"},
+    {"table": "cn_mainline_lifecycle_daily", "date_col": "trade_date", "label": "mainline_lifecycle"},
+    {"table": "cn_ga_market_pulse_daily", "date_col": "trade_date", "label": "ga_market_pulse"},
+]
+
+OPTIONAL_SOURCE_TABLES: list[dict[str, str]] = [
+    {"table": "cn_industry_capital_flow_daily", "date_col": "trade_date", "label": "industry_capital_flow"},
+]
+
+SOURCE_COVERAGE_SQL = """
+    SELECT
+        COUNT(*) AS row_count,
+        MIN({date_col}) AS min_date,
+        MAX({date_col}) AS max_date,
+        COUNT(DISTINCT {date_col}) AS date_count
+    FROM {table}
+    WHERE {date_col} BETWEEN :start AND :end
+"""
+
+
+def _source_coverage_row(engine: Engine, table: str, date_col: str, start: date, end: date) -> dict[str, Any]:
+    if not table_exists(engine, engine.url.database, table):
+        return {
+            "table": table,
+            "date_col": date_col,
+            "row_count": 0,
+            "min_date": None,
+            "max_date": None,
+            "date_count": 0,
+            "exists": False,
+        }
+
+    sql = SOURCE_COVERAGE_SQL.format(table=table, date_col=date_col)
+    with engine.connect() as conn:
+        row = conn.execute(text(sql), {"start": start, "end": end}).mappings().first()
+    if row is None:
+        return {
+            "table": table,
+            "date_col": date_col,
+            "row_count": 0,
+            "min_date": None,
+            "max_date": None,
+            "date_count": 0,
+            "exists": True,
+        }
+
+    return {
+        "table": table,
+        "date_col": date_col,
+        "row_count": int(row.get("row_count") or 0),
+        "min_date": row.get("min_date"),
+        "max_date": row.get("max_date"),
+        "date_count": int(row.get("date_count") or 0),
+        "exists": True,
+    }
+
+
+def _normalize_date_value(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.strptime(value[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return None
+    return None
+
+
+def audit_source_data_coverage(engine: Engine, start: date, end: date) -> None:
+    """
+    Fail-fast source data coverage audit.
+
+    Required tables must:
+      1. exist
+      2. contain at least one row in the requested date range
+      3. have min_date <= start and max_date >= end within the requested filter
+
+    Optional tables are reported but do not block execution.
+    """
+    print(f"[{_ts()}] Source data coverage audit start: {start} ~ {end}", flush=True)
+
+    missing_or_incomplete: list[str] = []
+
+    for spec in REQUIRED_SOURCE_TABLES:
+        table = spec["table"]
+        date_col = spec["date_col"]
+        label = spec["label"]
+        t0 = time.time()
+        info = _source_coverage_row(engine, table, date_col, start, end)
+
+        min_date = _normalize_date_value(info.get("min_date"))
+        max_date = _normalize_date_value(info.get("max_date"))
+        row_count = info.get("row_count", 0)
+        date_count = info.get("date_count", 0)
+
+        status = "OK"
+        reason = ""
+        if not info.get("exists"):
+            status = "MISSING_TABLE"
+            reason = "table does not exist"
+        elif row_count <= 0:
+            status = "NO_ROWS"
+            reason = "no rows in requested date range"
+        elif min_date is None or max_date is None:
+            status = "INVALID_DATES"
+            reason = "min/max date is NULL"
+        elif min_date > start or max_date < end:
+            status = "RANGE_NOT_COVERED"
+            reason = f"available={min_date}~{max_date}, required={start}~{end}"
+
+        print(
+            f"[{_ts()}]   required {label:<24} table={table:<36} "
+            f"rows={row_count:,} dates={date_count:,} range={min_date}~{max_date} "
+            f"status={status} ({_fmt_seconds(time.time() - t0)})",
+            flush=True,
+        )
+
+        if status != "OK":
+            missing_or_incomplete.append(
+                f"- {table}.{date_col}: {status} | {reason}"
+            )
+
+    for spec in OPTIONAL_SOURCE_TABLES:
+        table = spec["table"]
+        date_col = spec["date_col"]
+        label = spec["label"]
+        t0 = time.time()
+        info = _source_coverage_row(engine, table, date_col, start, end)
+
+        min_date = _normalize_date_value(info.get("min_date"))
+        max_date = _normalize_date_value(info.get("max_date"))
+        row_count = info.get("row_count", 0)
+        date_count = info.get("date_count", 0)
+
+        status = "OK"
+        if not info.get("exists"):
+            status = "MISSING_TABLE_OPTIONAL"
+        elif row_count <= 0:
+            status = "NO_ROWS_OPTIONAL"
+        elif min_date is None or max_date is None:
+            status = "INVALID_DATES_OPTIONAL"
+        elif min_date > start or max_date < end:
+            status = "RANGE_NOT_COVERED_OPTIONAL"
+
+        print(
+            f"[{_ts()}]   optional {label:<24} table={table:<36} "
+            f"rows={row_count:,} dates={date_count:,} range={min_date}~{max_date} "
+            f"status={status} ({_fmt_seconds(time.time() - t0)})",
+            flush=True,
+        )
+
+    if missing_or_incomplete:
+        print("", flush=True)
+        print("=" * 60, flush=True)
+        print("[SOURCE DATA AUDIT FAILED]", flush=True)
+        print("Required source tables do not cover the requested input date range.", flush=True)
+        print("Missing / incomplete required sources:", flush=True)
+        for item in missing_or_incomplete:
+            print(item, flush=True)
+        print("=" * 60, flush=True)
+        sys.exit(2)
+
+    print(f"[{_ts()}] Source data coverage audit PASS", flush=True)
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
@@ -1305,27 +1571,92 @@ def main() -> None:
     else:
         print(f"[WARNING] DDL file not found: {ddl_path}")
 
-    result_df = run_build(args)
-
-    if result_df.empty:
-        print("No data computed. Exiting.")
-        sys.exit(0)
-
-    written = write_to_db(engine, result_df, args.db_name, args.replace, args.dry_run, args.verbose)
-
     start = datetime.strptime(args.start, "%Y-%m-%d").date() if "-" in args.start else datetime.strptime(args.start, "%Y%m%d").date()
     end = datetime.strptime(args.end, "%Y-%m-%d").date() if args.end and "-" in args.end else (
         datetime.strptime(args.end, "%Y%m%d").date() if args.end else date.today()
     )
-    csv_path, md_path = generate_reports(result_df, start, end, args.output_dir)
+
+    audit_source_data_coverage(engine, start, end)
+
+    chunks = _date_chunks(start, end, getattr(args, "chunk_months", 3))
+    total_chunks = len(chunks)
+    total_computed = 0
+    total_written = 0
+    chunk_reports: list[tuple[str, str]] = []
+    overall_started_at = time.time()
+
+    print(
+        f"[{_ts()}] Chunked build enabled: chunks={total_chunks}, "
+        f"chunk_months={getattr(args, 'chunk_months', 3)}",
+        flush=True,
+    )
+
+    for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks, 1):
+        chunk_started_at = time.time()
+        print("", flush=True)
+        print("=" * 60, flush=True)
+        print(
+            f"[{_ts()}] Chunk {chunk_idx}/{total_chunks}: {chunk_start} ~ {chunk_end} "
+            f"overall_elapsed={_fmt_seconds(time.time() - overall_started_at)}",
+            flush=True,
+        )
+        print("=" * 60, flush=True)
+
+        chunk_args = argparse.Namespace(**vars(args))
+        chunk_args.start = chunk_start.strftime("%Y-%m-%d")
+        chunk_args.end = chunk_end.strftime("%Y-%m-%d")
+
+        result_df = run_build(chunk_args)
+
+        if result_df.empty:
+            print(f"[{_ts()}] Chunk {chunk_idx}/{total_chunks} produced no rows", flush=True)
+            continue
+
+        written = write_to_db(
+            engine,
+            result_df,
+            args.db_name,
+            args.replace,
+            args.dry_run,
+            args.verbose,
+        )
+        total_computed += len(result_df)
+        total_written += written
+
+        if not getattr(args, "no_report", False):
+            report_started_at = time.time()
+            print(f"[{_ts()}] Generating chunk report ...", flush=True)
+            csv_path, md_path = generate_reports(result_df, chunk_start, chunk_end, args.output_dir)
+            chunk_reports.append((csv_path, md_path))
+            print(f"[{_ts()}] Chunk report complete ({_fmt_seconds(time.time() - report_started_at)})", flush=True)
+
+        chunk_elapsed = time.time() - chunk_started_at
+        remaining = total_chunks - chunk_idx
+        eta = chunk_elapsed * remaining
+        print(
+            f"[{_ts()}] Chunk {chunk_idx}/{total_chunks} done: "
+            f"computed={len(result_df):,}, written={written:,}, "
+            f"chunk_elapsed={_fmt_seconds(chunk_elapsed)}, eta≈{_fmt_seconds(eta)}",
+            flush=True,
+        )
+
+        del result_df
+
+    if total_computed <= 0:
+        print("No data computed. Exiting.")
+        sys.exit(0)
 
     print()
     print("=" * 60)
     print(f"  Build Complete")
-    print(f"  Rows computed: {len(result_df)}")
-    print(f"  Rows written:  {written}")
-    print(f"  CSV report:    {csv_path}")
-    print(f"  MD  report:    {md_path}")
+    print(f"  Chunks:         {total_chunks}")
+    print(f"  Rows computed:  {total_computed}")
+    print(f"  Rows written:   {total_written}")
+    print(f"  Total elapsed:  {_fmt_seconds(time.time() - overall_started_at)}")
+    if getattr(args, "no_report", False):
+        print(f"  Reports:        skipped (--no-report)")
+    else:
+        print(f"  Chunk reports:  {len(chunk_reports)}")
     print("=" * 60)
 
 

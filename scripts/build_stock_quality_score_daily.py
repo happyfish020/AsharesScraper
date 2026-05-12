@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,43 @@ from sqlalchemy.engine import Engine, URL
 # ---------------------------------------------------------------------------
 
 REPORT_DIR = Path("reports") / "stock_quality"
+
+
+def _ts() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def _fmt_seconds(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m {seconds}s"
+
+
+def _progress_line(label: str, current: int, total: int, started_at: float, extra: str = "") -> None:
+    if total <= 0:
+        return
+    elapsed = time.time() - started_at
+    pct = current * 100 // total
+    eta = (elapsed / current * (total - current)) if current > 0 else 0.0
+    suffix = f" | {extra}" if extra else ""
+    print(
+        f"[{_ts()}]   {label}: {current:,}/{total:,} ({pct}%) "
+        f"elapsed={_fmt_seconds(elapsed)} eta={_fmt_seconds(eta)}{suffix}",
+        flush=True,
+    )
+
+
+def _timed_load(label: str, loader, *args, **kwargs) -> pd.DataFrame:
+    t0 = time.time()
+    print(f"[{_ts()}]   Loading {label} ...", flush=True)
+    df = loader(*args, **kwargs)
+    print(f"[{_ts()}]   {label:<30} {len(df):>12,} rows ({_fmt_seconds(time.time() - t0)})", flush=True)
+    return df
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -73,6 +111,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--replace", action="store_true", help="Replace existing rows in date range")
     parser.add_argument("--output-dir", default=None, help="Override report output directory")
     parser.add_argument("--verbose", action="store_true", help="Verbose logging")
+    parser.add_argument(
+        "--chunk-months",
+        type=int,
+        default=3,
+        help="Process output date range in chunks to avoid loading full cn_stock_fundamental_daily history at once",
+    )
     return parser
 
 
@@ -646,9 +690,81 @@ def _determine_risk_flag(
     return "NONE"
 
 
+
+# ---------------------------------------------------------------------------
+# Source data coverage preflight
+# ---------------------------------------------------------------------------
+
+REQUIRED_SOURCE_TABLES = [
+    ("cn_stock_fundamental_daily", "trade_date"),
+    ("cn_stock_fina_indicator", "ann_date"),
+    ("cn_stock_income", "ann_date"),
+    ("cn_stock_balancesheet", "ann_date"),
+]
+
+def _normalize_date_value(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return None
+
+def audit_source_data_coverage(engine: Engine, start: date, end: date, lookback_start: date) -> None:
+    print(f"[{_ts()}] Source data coverage audit start: {lookback_start} ~ {end}", flush=True)
+    failures = []
+    for table_name, date_col in REQUIRED_SOURCE_TABLES:
+        if not table_exists(engine, engine.url.database, table_name):
+            failures.append(f"- {table_name}: table does not exist")
+            continue
+        sql = f"""
+        SELECT COUNT(*) AS row_count, MIN({date_col}) AS min_date, MAX({date_col}) AS max_date
+        FROM {table_name}
+        WHERE {date_col} BETWEEN :start AND :end
+          AND {date_col} IS NOT NULL
+        """
+        with engine.connect() as conn:
+            row = conn.execute(text(sql), {"start": lookback_start, "end": end}).mappings().first()
+        row_count = int((row or {}).get("row_count") or 0)
+        min_date = _normalize_date_value((row or {}).get("min_date"))
+        max_date = _normalize_date_value((row or {}).get("max_date"))
+        print(f"[{_ts()}]   {table_name:<30} rows={row_count:,} range={min_date}~{max_date}", flush=True)
+        if row_count <= 0 or min_date is None or max_date is None or min_date > lookback_start or max_date < end:
+            failures.append(f"- {table_name}.{date_col}: available={min_date}~{max_date}, required={lookback_start}~{end}")
+    if failures:
+        print("=" * 60, flush=True)
+        print("[SOURCE DATA AUDIT FAILED]", flush=True)
+        for item in failures:
+            print(item, flush=True)
+        print("=" * 60, flush=True)
+        sys.exit(2)
+    print(f"[{_ts()}] Source data coverage audit PASS", flush=True)
+
+
 # ---------------------------------------------------------------------------
 # Main build logic
 # ---------------------------------------------------------------------------
+
+
+
+
+def _date_chunks(start: date, end: date, months: int) -> list[tuple[date, date]]:
+    """Split [start, end] into month-based chunks."""
+    if months <= 0:
+        months = 3
+    chunks: list[tuple[date, date]] = []
+    cur = start
+    while cur <= end:
+        next_month = date(
+            cur.year + (cur.month + months - 1) // 12,
+            (cur.month + months - 1) % 12 + 1,
+            1,
+        )
+        chunk_end = min(next_month - timedelta(days=1), end)
+        chunks.append((cur, chunk_end))
+        cur = next_month
+    return chunks
 
 
 def run_build(args: argparse.Namespace) -> pd.DataFrame:
@@ -676,47 +792,31 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
     db_password = args.db_password or os.getenv("ASHARE_MYSQL_PASSWORD", "sec_Bobo123")
     engine = build_engine(args.db_host, args.db_port, args.db_user, db_password, args.db_name)
 
-    if verbose:
-        print(f"[INFO] Date range: {start} ~ {end}")
-        print(f"[INFO] Lookback start: {lookback_start}")
-        print(f"[INFO] Database: {args.db_name}")
-        print(f"[INFO] Dry-run: {dry_run}")
+    build_started_at = time.time()
+    print(f"[{_ts()}] Date range: {start} ~ {end}", flush=True)
+    print(f"[{_ts()}] Lookback start: {lookback_start}", flush=True)
+    print(f"[{_ts()}] Database: {args.db_name} | dry_run={dry_run} | replace={args.replace}", flush=True)
 
     # ── Load input data ─────────────────────────────────────────────
     # Financial data lookback must be wide enough so that for every trade_date
     # in the target range, we have records with ann_date <= trade_date.
     fina_lookback = start - timedelta(days=1100)  # ~3 years for financial data
 
-    if verbose:
-        print("[INFO] Loading cn_stock_fundamental_daily ...")
-    fund_df = load_stock_fundamental_daily(engine, lookback_start, end)
+    print(f"[{_ts()}] Loading source tables ...", flush=True)
+    fund_df = _timed_load("cn_stock_fundamental_daily", load_stock_fundamental_daily, engine, lookback_start, end)
     if fund_df.empty:
-        print("WARNING: cn_stock_fundamental_daily is empty for the range")
+        print(f"[{_ts()}] WARNING: cn_stock_fundamental_daily is empty for the range", flush=True)
         return pd.DataFrame()
-    if verbose:
-        print(f"[INFO]   -> {len(fund_df)} rows loaded")
 
-    if verbose:
-        print("[INFO] Loading cn_stock_fina_indicator ...")
-    fina_df = load_fina_indicator(engine, fina_lookback, end)
-    if verbose:
-        print(f"[INFO]   -> {len(fina_df)} rows loaded")
-
-    if verbose:
-        print("[INFO] Loading cn_stock_income ...")
-    income_df = load_income(engine, fina_lookback, end)
-    if verbose:
-        print(f"[INFO]   -> {len(income_df)} rows loaded")
-
-    if verbose:
-        print("[INFO] Loading cn_stock_balancesheet ...")
-    bs_df = load_balancesheet(engine, fina_lookback, end)
-    if verbose:
-        print(f"[INFO]   -> {len(bs_df)} rows loaded")
+    fina_df = _timed_load("cn_stock_fina_indicator", load_fina_indicator, engine, fina_lookback, end)
+    income_df = _timed_load("cn_stock_income", load_income, engine, fina_lookback, end)
+    bs_df = _timed_load("cn_stock_balancesheet", load_balancesheet, engine, fina_lookback, end)
 
     # ── Prepare fina_indicator data (with ann_date filtering) ───────
     # Build a per-symbol list of records sorted by ann_date, so we can
     # pick the most recent record with ann_date <= trade_date at each row.
+    print(f"[{_ts()}] Preparing financial lookup maps ...", flush=True)
+    prep_started_at = time.time()
     fina_records_by_symbol: dict[str, list[dict[str, Any]]] = {}
     if not fina_df.empty:
         fina_df["symbol"] = fina_df["symbol"].astype(str).str.split(".").str[0]
@@ -726,8 +826,13 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
         fina_df = fina_df.drop_duplicates(subset=["symbol", "end_date"], keep="first")
         # Sort by ann_date ascending so we can binary-search for the right record
         fina_df = fina_df.sort_values(["symbol", "ann_date"], ascending=[True, True]).reset_index(drop=True)
-        for sym, grp in fina_df.groupby("symbol"):
+        fina_groups = list(fina_df.groupby("symbol"))
+        total_fina_groups = len(fina_groups)
+        report_every = max(500, total_fina_groups // 10 or 1)
+        for i, (sym, grp) in enumerate(fina_groups, 1):
             fina_records_by_symbol[sym] = grp.to_dict(orient="records")
+            if i % report_every == 0 or i == total_fina_groups:
+                _progress_line("fina lookup", i, total_fina_groups, prep_started_at)
 
     # ── Prepare income data (with ann_date filtering) ───────────────
     income_records_by_symbol: dict[str, list[dict[str, Any]]] = {}
@@ -738,8 +843,13 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
         income_df = income_df.sort_values(["symbol", "end_date", "ann_date"], ascending=[True, False, False])
         income_df = income_df.drop_duplicates(subset=["symbol", "end_date"], keep="first")
         income_df = income_df.sort_values(["symbol", "ann_date"], ascending=[True, True]).reset_index(drop=True)
-        for sym, grp in income_df.groupby("symbol"):
+        income_groups = list(income_df.groupby("symbol"))
+        total_income_groups = len(income_groups)
+        report_every = max(500, total_income_groups // 10 or 1)
+        for i, (sym, grp) in enumerate(income_groups, 1):
             income_records_by_symbol[sym] = grp.to_dict(orient="records")
+            if i % report_every == 0 or i == total_income_groups:
+                _progress_line("income lookup", i, total_income_groups, prep_started_at)
 
     # ── Prepare balancesheet data (with ann_date filtering) ─────────
     bs_records_by_symbol: dict[str, list[dict[str, Any]]] = {}
@@ -750,8 +860,14 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
         bs_df = bs_df.sort_values(["symbol", "end_date", "ann_date"], ascending=[True, False, False])
         bs_df = bs_df.drop_duplicates(subset=["symbol", "end_date"], keep="first")
         bs_df = bs_df.sort_values(["symbol", "ann_date"], ascending=[True, True]).reset_index(drop=True)
-        for sym, grp in bs_df.groupby("symbol"):
+        bs_groups = list(bs_df.groupby("symbol"))
+        total_bs_groups = len(bs_groups)
+        report_every = max(500, total_bs_groups // 10 or 1)
+        for i, (sym, grp) in enumerate(bs_groups, 1):
             bs_records_by_symbol[sym] = grp.to_dict(orient="records")
+            if i % report_every == 0 or i == total_bs_groups:
+                _progress_line("balancesheet lookup", i, total_bs_groups, prep_started_at)
+    print(f"[{_ts()}] Lookup maps ready in {_fmt_seconds(time.time() - prep_started_at)}", flush=True)
 
     # ── Helper: find latest record with ann_date <= trade_date ──────
     # ═══════════════════════════════════════════════════════════════════
@@ -802,6 +918,11 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
     prev_by_symbol: dict[str, dict[str, Any]] = {}
 
     fund_df = fund_df.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+    total_rows = len(fund_df)
+    target_rows = len(fund_df[fund_df["trade_date"] >= start]) if "trade_date" in fund_df.columns else total_rows
+    report_every = max(5000, total_rows // 20 or 1)
+    compute_started_at = time.time()
+    print(f"[{_ts()}] Computing quality scores ... total_input={total_rows:,}, target_rows≈{target_rows:,}", flush=True)
 
     for idx, row in fund_df.iterrows():
         symbol = row["symbol"]
@@ -930,6 +1051,11 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
         # Update previous state
         prev_by_symbol[symbol] = enriched
 
+        if (idx + 1) % report_every == 0 or idx == total_rows - 1:
+            _progress_line("quality rows", idx + 1, total_rows, compute_started_at, f"output={len(results):,}")
+
+    print(f"[{_ts()}] Quality score computation complete: output={len(results):,} rows ({_fmt_seconds(time.time() - compute_started_at)})", flush=True)
+
     if not results:
         print("WARNING: No results computed")
         return pd.DataFrame()
@@ -939,10 +1065,10 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
     # Filter to requested date range only
     result_df = result_df[result_df["trade_date"].between(start, end)].copy()
 
-    if verbose:
-        print(f"[INFO] Computed {len(result_df)} rows")
-        print(f"[INFO] Quality score range: [{result_df['quality_score'].min():.4f}, {result_df['quality_score'].max():.4f}]")
-        print(f"[INFO] Risk flag distribution: {result_df['fundamental_risk_flag'].value_counts().to_dict()}")
+    print(f"[{_ts()}] Computed {len(result_df):,} rows", flush=True)
+    print(f"[{_ts()}] Quality score range: [{result_df['quality_score'].min():.4f}, {result_df['quality_score'].max():.4f}]", flush=True)
+    print(f"[{_ts()}] Risk flag distribution: {result_df['fundamental_risk_flag'].value_counts().to_dict()}", flush=True)
+    print(f"[{_ts()}] Build stage elapsed: {_fmt_seconds(time.time() - build_started_at)}", flush=True)
 
     return result_df
 
@@ -966,8 +1092,11 @@ def write_to_db(
         return 0
 
     if dry_run:
-        print(f"[DRY-RUN] Would write {len(df)} rows to cn_stock_quality_score_daily")
+        print(f"[{_ts()}] [DRY-RUN] Would write {len(df):,} rows to cn_stock_quality_score_daily", flush=True)
         return len(df)
+
+    write_started_at = time.time()
+    print(f"[{_ts()}] Writing to DB: cn_stock_quality_score_daily rows={len(df):,}", flush=True)
 
     # Ensure table exists
     if not table_exists(engine, db_name, "cn_stock_quality_score_daily"):
@@ -992,8 +1121,7 @@ def write_to_db(
         """
         with engine.begin() as conn:
             deleted = conn.execute(text(del_sql), {"start": min_date, "end": max_date}).rowcount
-        if verbose:
-            print(f"[INFO] Deleted {deleted} existing rows in [{min_date}, {max_date}]")
+        print(f"[{_ts()}]   Deleted {deleted:,} existing rows in [{min_date}, {max_date}]", flush=True)
 
     # Prepare rows for upsert
     columns = [
@@ -1042,9 +1170,9 @@ def write_to_db(
             batch = rows[i : i + batch_size]
             conn.execute(text(upsert_sql), batch)
             total += len(batch)
-        if verbose:
-            print(f"[INFO] Wrote {total} rows to cn_stock_quality_score_daily")
+            _progress_line("DB write", total, len(rows), write_started_at)
 
+    print(f"[{_ts()}] DB write complete: {total:,} rows ({_fmt_seconds(time.time() - write_started_at)})", flush=True)
     return total
 
 
@@ -1183,30 +1311,78 @@ def main() -> None:
     else:
         print(f"[WARNING] DDL file not found: {ddl_path}")
 
-    # Run build
-    result_df = run_build(args)
-
-    if result_df.empty:
-        print("No data computed. Exiting.")
-        sys.exit(0)
-
-    # Write to DB
-    written = write_to_db(engine, result_df, args.db_name, args.replace, args.dry_run, args.verbose)
-
-    # Generate reports
+    # Run build in chunks so cn_stock_fundamental_daily is not loaded for the full range at once.
     start = datetime.strptime(args.start, "%Y-%m-%d").date() if "-" in args.start else datetime.strptime(args.start, "%Y%m%d").date()
     end = datetime.strptime(args.end, "%Y-%m-%d").date() if args.end and "-" in args.end else (
         datetime.strptime(args.end, "%Y%m%d").date() if args.end else date.today()
     )
+
+    lookback_start = start - timedelta(days=1100)
+    audit_source_data_coverage(engine, start, end, lookback_start)
+
+    chunks = _date_chunks(start, end, getattr(args, "chunk_months", 3))
+    total_chunks = len(chunks)
+    total_written = 0
+    total_computed = 0
+    all_results: list[pd.DataFrame] = []
+    overall_started_at = time.time()
+
+    print(f"[{_ts()}] Chunked build enabled: chunks={total_chunks}, chunk_months={getattr(args, 'chunk_months', 3)}", flush=True)
+
+    for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks, 1):
+        chunk_started_at = time.time()
+        remaining_before = total_chunks - chunk_idx
+        print("", flush=True)
+        print("=" * 60, flush=True)
+        print(
+            f"[{_ts()}] Chunk {chunk_idx}/{total_chunks}: {chunk_start} ~ {chunk_end} "
+            f"(elapsed={_fmt_seconds(time.time() - overall_started_at)})",
+            flush=True,
+        )
+        print("=" * 60, flush=True)
+
+        chunk_args = argparse.Namespace(**vars(args))
+        chunk_args.start = chunk_start.strftime("%Y-%m-%d")
+        chunk_args.end = chunk_end.strftime("%Y-%m-%d")
+
+        chunk_df = run_build(chunk_args)
+        if chunk_df.empty:
+            print(f"[{_ts()}] Chunk {chunk_idx}/{total_chunks} produced no rows", flush=True)
+            continue
+
+        written = write_to_db(engine, chunk_df, args.db_name, args.replace, args.dry_run, args.verbose)
+        total_written += written
+        total_computed += len(chunk_df)
+        all_results.append(chunk_df)
+
+        chunk_elapsed = time.time() - chunk_started_at
+        eta_seconds = remaining_before * chunk_elapsed
+        print(
+            f"[{_ts()}] Chunk {chunk_idx}/{total_chunks} done: "
+            f"computed={len(chunk_df):,}, written={written:,}, "
+            f"chunk_elapsed={_fmt_seconds(chunk_elapsed)}, eta≈{_fmt_seconds(eta_seconds)}",
+            flush=True,
+        )
+
+    if not all_results:
+        print("No data computed. Exiting.")
+        sys.exit(0)
+
+    report_started_at = time.time()
+    print(f"[{_ts()}] Generating reports from chunk outputs ...", flush=True)
+    result_df = pd.concat(all_results, ignore_index=True)
     csv_path, md_path = generate_reports(result_df, start, end, args.output_dir)
+    print(f"[{_ts()}] Reports complete ({_fmt_seconds(time.time() - report_started_at)})", flush=True)
 
     print()
     print("=" * 60)
     print(f"  Build Complete")
-    print(f"  Rows computed: {len(result_df)}")
-    print(f"  Rows written:  {written}")
-    print(f"  CSV report:    {csv_path}")
-    print(f"  MD  report:    {md_path}")
+    print(f"  Chunks:         {total_chunks}")
+    print(f"  Rows computed:  {total_computed}")
+    print(f"  Rows written:   {total_written}")
+    print(f"  Total elapsed:  {_fmt_seconds(time.time() - overall_started_at)}")
+    print(f"  CSV report:     {csv_path}")
+    print(f"  MD  report:     {md_path}")
     print("=" * 60)
 
 
