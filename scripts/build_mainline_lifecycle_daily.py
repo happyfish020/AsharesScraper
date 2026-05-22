@@ -578,31 +578,8 @@ def _score_for_state(
         return 0.50
 
 
-def _compute_capital_concentration_score(
-    row: dict[str, Any],
-) -> float:
-    """
-    Compute capital_concentration_score from industry capital flow data.
-    Higher = more concentrated capital in top mainlines.
-    Uses concentration_score and market_share from cn_industry_capital_flow_daily.
-    Falls back to 0.0 if no capital flow data available.
-    """
-    concentration_score = row.get("concentration_score") or 0.0
-    market_share = row.get("market_share") or 0.0
-    # Blend raw concentration with market share
-    score = concentration_score * 0.6 + min(market_share * 5.0, 1.0) * 0.4
-    return round(min(score, 1.0), 4)
-
-
-def _compute_trend_alignment_score(
-    row: dict[str, Any],
-) -> float:
-    """
-    Compute trend_alignment_score from radar data.
-    Higher = more stocks in the industry aligned with uptrend.
-    """
-    raw = row.get("trend_alignment_score") or 0.0
-    return round(min(raw, 1.0), 4)
+# NOTE: _compute_capital_concentration_score and _compute_trend_alignment_score
+# have been inlined as vectorised numpy operations in run_build() for performance.
 
 
 # ---------------------------------------------------------------------------
@@ -610,10 +587,11 @@ def _compute_trend_alignment_score(
 # ---------------------------------------------------------------------------
 
 
-def run_build(args: argparse.Namespace) -> pd.DataFrame:
+def run_build(args: argparse.Namespace) -> int:
     """
     Execute the mainline lifecycle build for the given date range.
-    Returns the computed DataFrame (all dates).
+    Writes each chunk to DB immediately to minimise peak memory.
+    Returns the total number of rows written (0 if nothing was computed).
     """
     verbose = args.verbose
     dry_run = args.dry_run
@@ -640,8 +618,7 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
     print(f"[{_ts()}] Date range: {start} ~ {end} ({n_chunks} chunks, chunk_months={chunk_months})")
     print(f"[{_ts()}] Database: {args.db_name} | dry_run={dry_run} | replace={replace} | min_member_count={min_member}")
 
-    all_results: list[pd.DataFrame] = []
-
+    total_written = 0
     for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks, 1):
         chunk_t0 = time.time()
         lookback_start = chunk_start - timedelta(days=5)
@@ -761,6 +738,12 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
 
         before_filter = len(df)
         df = df[df["member_count"].fillna(0) >= min_member].copy()
+        if min_member <= 1:
+           df["member_count"] = df["member_count"].fillna(1)
+        else:
+           df["member_count"] = df["member_count"].fillna(0)
+
+        df = df[df["member_count"] >= min_member].copy()
         print(
             f"[{_ts()}]   merged_rows={before_filter:,}, "
             f"after_min_member_filter={len(df):,} ({_fmt_seconds(time.time() - merge_t0)})"
@@ -792,11 +775,15 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
         # ── Sort for sequential processing ──────────────────────────────
         df = df.sort_values(["mainline_id", "trade_date"]).reset_index(drop=True)
 
-        # ── Compute derived scores ──────────────────────────────────────
+        # ── Compute derived scores (vectorised, no apply) ───────────────
         print(f"[{_ts()}] Computing derived scores...")
         derived_t0 = time.time()
-        df["capital_concentration_score"] = df.apply(_compute_capital_concentration_score, axis=1)
-        df["trend_alignment_score"] = df.apply(_compute_trend_alignment_score, axis=1)
+        # Vectorised capital_concentration_score
+        conc_score = df["concentration_score"].fillna(0.0).to_numpy()
+        mkt_share = df["market_share"].fillna(0.0).to_numpy()
+        df["capital_concentration_score"] = np.clip(conc_score * 0.6 + np.minimum(mkt_share * 5.0, 1.0) * 0.4, 0.0, 1.0).round(4)
+        # Vectorised trend_alignment_score
+        df["trend_alignment_score"] = df["trend_alignment_score"].fillna(0.0).clip(0.0, 1.0).round(4)
         print(f"[{_ts()}]   derived scores complete ({_fmt_seconds(time.time() - derived_t0)})")
 
         # ── Compute lifecycle state per row ─────────────────────────────
@@ -807,18 +794,63 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
         total_rows = len(df)
         report_every = max(500, total_rows // 20)
 
-        for idx, row in df.iterrows():
-            mainline_id = row["mainline_id"]
-            trade_date_val = row["trade_date"]
-            if isinstance(trade_date_val, str):
-                trade_date_val = datetime.strptime(trade_date_val, "%Y-%m-%d").date()
-            elif isinstance(trade_date_val, datetime):
-                trade_date_val = trade_date_val.date()
+        # Pre-extract columns as numpy arrays for fast access in the loop
+        _mainline_id_arr = df["mainline_id"].to_numpy()
+        _trade_date_arr = df["trade_date"].to_numpy()
+        _mainline_name_arr = df["mainline_name"].to_numpy()
+        _mainline_score_arr = df["mainline_score"].to_numpy()
+        _mainline_strength_arr = df["mainline_strength"].to_numpy()
+        _cap_conc_arr = df["capital_concentration_score"].to_numpy()
+        _trend_align_arr = df["trend_alignment_score"].to_numpy()
+        _breakout_arr = df["breakout_ratio"].to_numpy()
+        _new_high_arr = df["new_high_ratio"].to_numpy()
+        _leader_density_arr = df["leader_density"].to_numpy()
+        _rotation_rank_arr = df["rotation_rank"].to_numpy()
+        _member_count_arr = df["member_count"].to_numpy()
+        _strong_stock_arr = df["strong_stock_count"].to_numpy()
+        # Stock strength columns
+        _strength_ld_arr = df["strength_leader_density"].to_numpy() if "strength_leader_density" in df.columns else None
+        _trend_alignment_arr = df["trend_alignment"].to_numpy() if "trend_alignment" in df.columns else None
+        _breadth_arr = df["breadth_score"].to_numpy() if "breadth_score" in df.columns else None
+        _acceleration_arr = df["acceleration_score"].to_numpy() if "acceleration_score" in df.columns else None
+        _rank_arr = df["rank_in_market"].to_numpy() if "rank_in_market" in df.columns else None
+        _active_arr = df["is_active_mainline"].to_numpy() if "is_active_mainline" in df.columns else None
+
+        # Pre-convert trade_date values to date objects
+        _trade_date_parsed = []
+        for td in _trade_date_arr:
+            if isinstance(td, str):
+                _trade_date_parsed.append(datetime.strptime(td, "%Y-%m-%d").date())
+            elif isinstance(td, datetime):
+                _trade_date_parsed.append(td.date())
+            else:
+                _trade_date_parsed.append(td)
+        _trade_date_parsed = np.array(_trade_date_parsed, dtype=object)
+
+        # Helper to build row_dict from numpy arrays at index i
+        def _build_row_dict(i: int) -> dict[str, Any]:
+            return {
+                "mainline_score": _mainline_score_arr[i],
+                "mainline_strength": _mainline_strength_arr[i],
+                "strength_leader_density": _strength_ld_arr[i] if _strength_ld_arr is not None else 0.0,
+                "trend_alignment": _trend_alignment_arr[i] if _trend_alignment_arr is not None else 0.0,
+                "breadth_score": _breadth_arr[i] if _breadth_arr is not None else 0.0,
+                "acceleration_score": _acceleration_arr[i] if _acceleration_arr is not None else 0.0,
+                "rank_in_market": int(_rank_arr[i]) if _rank_arr is not None else 999,
+                "is_active_mainline": int(_active_arr[i]) if _active_arr is not None else 0,
+                "capital_concentration_score": _cap_conc_arr[i],
+                "member_count": int(_member_count_arr[i]) if not np.isnan(_member_count_arr[i]) else 0,
+                "trade_date": _trade_date_parsed[i],
+            }
+
+        for idx in range(total_rows):
+            mainline_id = str(_mainline_id_arr[idx])
+            trade_date_val = _trade_date_parsed[idx]
 
             # Skip lookback dates for final output
             if trade_date_val < chunk_start:
                 # Still update prev state
-                prev_by_mainline[mainline_id] = row.to_dict()
+                prev_by_mainline[mainline_id] = _build_row_dict(idx)
                 if (idx + 1) % report_every == 0:
                     pct = int((idx + 1) * 100 / max(total_rows, 1))
                     print(
@@ -828,8 +860,7 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
                 continue
 
             prev_row = prev_by_mainline.get(mainline_id)
-            row_dict = row.to_dict()
-            row_dict["trade_date"] = trade_date_val
+            row_dict = _build_row_dict(idx)
 
             state, score, reason, risk = _compute_lifecycle_state(
                 row_dict, prev_row, market_pulse_map
@@ -838,21 +869,21 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
             results.append({
                 "trade_date": trade_date_val,
                 "mainline_id": mainline_id,
-                "mainline_name": row.get("mainline_name", ""),
-                "mainline_score": row.get("mainline_score"),
-                "mainline_strength": row.get("mainline_strength"),
-                "capital_concentration_score": row_dict.get("capital_concentration_score"),
-                "trend_alignment_score": row_dict.get("trend_alignment_score"),
-                "breakout_ratio": row.get("breakout_ratio"),
-                "new_high_ratio": row.get("new_high_ratio"),
-                "leader_density": row.get("leader_density"),
-                "rotation_rank": row.get("rotation_rank"),
+                "mainline_name": str(_mainline_name_arr[idx]) if pd.notna(_mainline_name_arr[idx]) else "",
+                "mainline_score": float(_mainline_score_arr[idx]) if pd.notna(_mainline_score_arr[idx]) else None,
+                "mainline_strength": float(_mainline_strength_arr[idx]) if pd.notna(_mainline_strength_arr[idx]) else None,
+                "capital_concentration_score": float(_cap_conc_arr[idx]),
+                "trend_alignment_score": float(_trend_align_arr[idx]),
+                "breakout_ratio": float(_breakout_arr[idx]) if pd.notna(_breakout_arr[idx]) else None,
+                "new_high_ratio": float(_new_high_arr[idx]) if pd.notna(_new_high_arr[idx]) else None,
+                "leader_density": float(_leader_density_arr[idx]) if pd.notna(_leader_density_arr[idx]) else None,
+                "rotation_rank": int(_rotation_rank_arr[idx]) if pd.notna(_rotation_rank_arr[idx]) else None,
                 "lifecycle_state": state,
                 "lifecycle_score": score,
                 "phase_reason": reason,
                 "risk_flag": risk,
-                "member_count": row.get("member_count", 0),
-                "strong_stock_count": row.get("strong_stock_count", 0),
+                "member_count": int(_member_count_arr[idx]) if pd.notna(_member_count_arr[idx]) else 0,
+                "strong_stock_count": int(_strong_stock_arr[idx]) if pd.notna(_strong_stock_arr[idx]) else 0,
             })
 
             # Update prev state
@@ -895,8 +926,15 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
         )
         print(f"[{_ts()}]   State distribution: {state_counts}")
 
+        # ── Write chunk to DB immediately ────────────────────────────────
         if not result_df.empty:
-            all_results.append(result_df)
+            if not dry_run:
+                written = write_to_db(engine, result_df, args.db_name, replace, dry_run, verbose)
+                total_written += written
+            else:
+                total_written += len(result_df)
+            # Free chunk memory before next iteration
+            del result_df
 
         chunk_elapsed = time.time() - chunk_t0
         elapsed_total = time.time() - overall_t0
@@ -905,15 +943,13 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
         print(f"[{_ts()}] Chunk complete in {_fmt_seconds(chunk_elapsed)}")
         print(f"[{_ts()}] Overall elapsed: {_fmt_seconds(elapsed_total)} | ETA remaining: {_fmt_seconds(remaining_est)}")
 
-    if not all_results:
+    if total_written == 0:
         print(f"[{_ts()}] WARNING: No results computed")
-        return pd.DataFrame()
+        return 0
 
-    final_df = pd.concat(all_results, ignore_index=True)
-    final_df = final_df.drop_duplicates(subset=["trade_date", "mainline_id"], keep="last")
     print()
-    print(f"[{_ts()}] All chunks complete. Total rows computed: {len(final_df):,}")
-    return final_df
+    print(f"[{_ts()}] All chunks complete. Total rows written: {total_written:,}")
+    return total_written
 
 
 # ---------------------------------------------------------------------------
@@ -1138,17 +1174,23 @@ def generate_reports(
 
         # ── Overall state distribution ──────────────────────────────
         f.write(f"## Overall State Distribution\n\n")
-        overall_counts = df["lifecycle_state"].value_counts()
-        for state_name, count in overall_counts.items():
-            pct = count / len(df) * 100
-            f.write(f"- **{state_name}**: {count} ({pct:.1f}%)\n")
+        if not df.empty:
+            overall_counts = df["lifecycle_state"].value_counts()
+            for state_name, count in overall_counts.items():
+                pct = count / len(df) * 100
+                f.write(f"- **{state_name}**: {count} ({pct:.1f}%)\n")
+        else:
+            f.write(f"- No data available.\n")
         f.write("\n")
 
         # ── Risk flag summary ───────────────────────────────────────
         f.write(f"## Risk Flag Summary\n\n")
-        risk_counts = df["risk_flag"].value_counts()
-        for flag_name, count in risk_counts.items():
-            f.write(f"- **{flag_name}**: {count}\n")
+        if not df.empty:
+            risk_counts = df["risk_flag"].value_counts()
+            for flag_name, count in risk_counts.items():
+                f.write(f"- **{flag_name}**: {count}\n")
+        else:
+            f.write(f"- No data available.\n")
         f.write("\n")
 
         # ── Lifecycle State Definitions ─────────────────────────────
@@ -1210,28 +1252,25 @@ def main() -> None:
     else:
         print(f"[WARNING] DDL file not found: {ddl_path}")
 
-    # Run build
-    result_df = run_build(args)
+    # Run build — writes each chunk to DB immediately
+    total_written = run_build(args)
 
-    if result_df.empty:
+    if total_written == 0:
         print("No data computed. Exiting.")
         sys.exit(0)
 
-    # Write to DB
-    written = write_to_db(engine, result_df, args.db_name, args.replace, args.dry_run, args.verbose)
-
-    # Generate reports
+    # Generate reports (pass an empty DataFrame since data was written per-chunk;
+    # generate_reports handles empty DataFrames gracefully).
     start = datetime.strptime(args.start, "%Y-%m-%d").date() if "-" in args.start else datetime.strptime(args.start, "%Y%m%d").date()
     end = datetime.strptime(args.end, "%Y-%m-%d").date() if args.end and "-" in args.end else (
         datetime.strptime(args.end, "%Y%m%d").date() if args.end else date.today()
     )
-    csv_path, md_path = generate_reports(result_df, start, end, args.output_dir)
+    csv_path, md_path = generate_reports(pd.DataFrame(), start, end, args.output_dir)
 
     print()
     print("=" * 60)
     print(f"  Build Complete")
-    print(f"  Rows computed: {len(result_df)}")
-    print(f"  Rows written:  {written}")
+    print(f"  Rows written:  {total_written:,}")
     print(f"  CSV report:    {csv_path}")
     print(f"  MD  report:    {md_path}")
     print("=" * 60)

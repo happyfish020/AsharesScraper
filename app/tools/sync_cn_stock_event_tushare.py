@@ -188,10 +188,9 @@ def _fetch_by_ann_date(pro, api_name: str, fields: str, start_date: date, end_da
                 break
             except Exception as e:
                 if attempt == 3:
-                    print(f"{api_name} ann_date={cur} failed: {e}")
                     progress.update(current_item=str(cur), extra=f"failed={e}")
-                else:
-                    time.sleep(1.5 * attempt)
+                    raise RuntimeError(f"[event.{api_name}] failed ann_date={cur}: {e}") from e
+                time.sleep(1.5 * attempt)
         cur += timedelta(days=1)
     progress.finish()
     if not frames:
@@ -224,10 +223,9 @@ def _fetch_dividend_by_ann_date(pro, fields: str, start_date: date, end_date: da
                     time.sleep(60)
                     continue
                 if attempt == 3:
-                    print(f"dividend ann_date={ymd} failed: {e}")
                     progress.update(current_item=ymd, extra=f"failed={e}")
-                else:
-                    time.sleep(1.5 * attempt)
+                    raise RuntimeError(f"[event.dividend] failed ann_date={ymd}: {e}") from e
+                time.sleep(1.5 * attempt)
         cur += timedelta(days=1)
     progress.finish()
     if not frames:
@@ -266,9 +264,8 @@ def _fetch_symbol_history(
                     time.sleep(60)
                     continue
                 if attempt == 3:
-                    print(f"{api_name} {sym} failed: {e}")
-                else:
-                    time.sleep(1.5 * attempt)
+                    raise RuntimeError(f"[event.{api_name}] failed ts_code={_symbol_to_ts_code(sym)} symbol={sym}: {e}") from e
+                time.sleep(1.5 * attempt)
         if raw is not None and not raw.empty:
             frames.append(raw)
             progress.update(current_item=sym, rows=int(len(raw)))
@@ -310,9 +307,8 @@ def _fetch_dividend_by_symbol(
                     time.sleep(60)
                     continue
                 if attempt == 3:
-                    print(f"dividend {sym} failed: {e}")
-                else:
-                    time.sleep(1.5 * attempt)
+                    raise RuntimeError(f"[event.dividend] failed ts_code={_symbol_to_ts_code(sym)} symbol={sym}: {e}") from e
+                time.sleep(1.5 * attempt)
         if raw is not None and not raw.empty:
             frames.append(raw)
             progress.update(current_item=sym, rows=int(len(raw)))
@@ -543,7 +539,17 @@ def load_fina_indicator(engine, pro, start_date: date, end_date: date, source_la
         "ts_code,ann_date,end_date,report_type,eps,dt_eps,roe,roe_dt,roa,grossprofit_margin,"
         "netprofit_margin,debt_to_eqt,netprofit_yoy,q_sales_yoy,or_yoy,tr_yoy,q_profit_yoy"
     )
-    raw = _fetch_by_ann_date(pro, "fina_indicator", fields, start_date, end_date, log=log)
+    # Tushare currently requires ts_code for fina_indicator. Do not call it by
+    # ann_date only, because that fails with: 必填参数, ts_code. EventLoaderTask
+    # no longer invokes this path; full financial data belongs to
+    # StockFundamentalMonthlyTask / cn_stock_fina_indicator.
+    if not symbols:
+        raise RuntimeError(
+            "[event.fina_indicator] requires explicit symbols/ts_code; "
+            "do not use event fina_indicator for monthly refresh. "
+            "Use StockFundamentalMonthlyTask instead, or pass --symbols/--max-symbols in standalone mode."
+        )
+    raw = _fetch_symbol_history(pro, "fina_indicator", fields, symbols, start_date, end_date, log=log)
     df = _normalize_fina_indicator(raw, source_label)
     key_cols = ["symbol", "ann_date", "end_date", "report_type"]
     affected = _upsert(engine, EVENT_TABLES["fina_indicator"], df, key_cols)
@@ -710,7 +716,10 @@ def rebuild_event_signal_daily(engine, start_date: date, end_date: date, include
         _fina_to_signal(fina),
         _dividend_to_signal(dividend),
     ]
-    merged = pd.concat([f for f in frames if f is not None and not f.empty], ignore_index=True)
+    non_empty_frames = [f for f in frames if f is not None and not f.empty]
+    if not non_empty_frames:
+        return 0
+    merged = pd.concat(non_empty_frames, ignore_index=True)
     if merged.empty:
         return 0
     merged = merged.dropna(subset=["trade_date", "symbol", "event_type"])
@@ -833,10 +842,7 @@ def main() -> None:
 
     rows_anns = aff_anns = 0
     if args.with_anns:
-        try:
-            rows_anns, aff_anns = load_anns_d(engine, pro, start_date, end_date, "tushare_anns_d")
-        except Exception as e:
-            print(f"anns_d skipped: {e}")
+        rows_anns, aff_anns = load_anns_d(engine, pro, start_date, end_date, "tushare_anns_d")
 
     if args.with_signal:
         rebuild_event_signal_daily(engine, start_date, end_date)

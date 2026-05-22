@@ -4,14 +4,14 @@
 DROP PROCEDURE IF EXISTS `SP_ROTATION_DAILY_REFRESH`;
 
 CREATE PROCEDURE `SP_ROTATION_DAILY_REFRESH`(
-    IN p_run_id VARCHAR(64),
+    IN p_run_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
     IN p_trade_date DATE,
     IN p_force TINYINT,
     IN p_refresh_energy TINYINT
 )
 proc: BEGIN
     DECLARE v_trade_date DATE;
-    DECLARE v_run_id VARCHAR(64);
+    DECLARE v_run_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
     SET v_run_id = COALESCE(NULLIF(p_run_id, ''), 'SR_LIVE_DEFAULT');
     SET v_trade_date = COALESCE(p_trade_date, (SELECT MAX(trade_date) FROM cn_stock_daily_price));

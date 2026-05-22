@@ -4,8 +4,9 @@ import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
+from sqlalchemy import text
+
 from app.tools.sync_cn_stock_daily_basic_from_tushare import (
-    apply_view,
     ensure_table,
     load_daily_basic_akshare,
     load_daily_basic_tushare,
@@ -145,11 +146,18 @@ class StockBasicTask:
             )
             return
 
-        apply_view(ctx.engine, "docs/DDL/cn_market.cn_stock_leader_score_v1.sql")
-        apply_view(ctx.engine, "docs/DDL/cn_market.cn_stock_leader_score_v2.sql")
+        # cn_stock_leader_score_daily is a BASE TABLE (partitioned, materialized).
+        # Materialize via stored procedure (replaces old v1/v2 view chain).
+        materialize_start = start_date.strftime("%Y-%m-%d")
+        materialize_end = end_date.strftime("%Y-%m-%d")
+        ctx.log.info(
+            "[stock_basic] materializing cn_stock_leader_score_daily via SP: %s ~ %s",
+            materialize_start, materialize_end,
+        )
+        _materialize_leader_score_daily(ctx.engine, materialize_start, materialize_end)
 
         ctx.log.info(
-            "[stock_basic] done provider=%s start=%s end=%s dates=%s rows=%s affected=%s ak_failures=%s calendar_source=%s date_order=%s batch_size=%s views_refreshed=1",
+            "[stock_basic] done provider=%s start=%s end=%s dates=%s rows=%s affected=%s ak_failures=%s calendar_source=%s date_order=%s batch_size=%s leader_materialized=1",
             used_provider,
             trade_dates[0],
             trade_dates[-1],
@@ -161,6 +169,22 @@ class StockBasicTask:
             date_order,
             batch_size,
         )
+
+
+def _materialize_leader_score_daily(engine, start_date: str, end_date: str) -> int:
+    """Materialize cn_stock_leader_score_daily via stored procedure.
+
+    Calls sp_materialize_leader_score(start_date, end_date) which uses
+    temporary tables to replace the old v1/v2 view chain.
+    Returns the number of affected rows.
+    """
+    sql = "CALL sp_materialize_leader_score(:start_date, :end_date)"
+    with engine.begin() as conn:
+        result = conn.execute(text(sql), {"start_date": start_date, "end_date": end_date})
+        # For CALL statements, rowcount may not reflect inserted rows reliably.
+        # We return 0 and let the caller rely on before/after comparison if needed.
+        affected = result.rowcount if result.rowcount > 0 else 0
+    return affected
 
 
 # Backward-compatible alias for existing imports.

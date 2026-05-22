@@ -76,7 +76,6 @@ def iter_trade_dates(engine, start_date: date, end_date: date, calendar_source: 
             SELECT DISTINCT trade_date
             FROM cn_board_member_map_d
             WHERE sector_type='INDUSTRY'
-              AND sector_id LIKE 'BK%%'
               AND trade_date >= :start_date
               AND trade_date <= :end_date
             ORDER BY trade_date
@@ -359,8 +358,8 @@ def main() -> None:
     parser.add_argument(
         "--calendar-source",
         choices=["board-map", "price"],
-        default="board-map",
-        help="Trade-date source used to select backfill dates",
+        default="price",
+        help="Trade-date source used to select backfill dates; board-map now uses all INDUSTRY rows, not BK-only rows",
     )
     parser.add_argument(
         "--date-order",
@@ -451,10 +450,9 @@ def main() -> None:
     if used_provider == "akshare":
         print(f"akshare_snapshot_only=1 failures={ak_failures}")
 
-    if not args.skip_views:
-        apply_view(engine, "docs/DDL/cn_market.cn_stock_leader_score_v1.sql")
-        apply_view(engine, "docs/DDL/cn_market.cn_stock_leader_score_v2.sql")
-        print("views_applied=cn_stock_leader_score_v1,cn_stock_leader_score_v2")
+    # NOTE: v1/v2 views are no longer applied here — they have been replaced by
+    # sp_materialize_leader_score (stored procedure with temp tables).
+    # The SP is called from stock_basic_weekly_task.py and daily_materialize_leader_score.py.
 
     print(
         f"daily_basic_done dates={len(trade_dates)} rows={total_rows} "

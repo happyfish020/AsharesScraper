@@ -70,12 +70,12 @@ def audit_report():
                 map_lagging = True
                 overall_status = "PARTIAL"
 
-        # 5. cn_stock_leader_score_v2 (P0)
-        log.info("[5/5] Auditing cn_stock_leader_score_v2...")
+        # 5. cn_stock_leader_score_daily (P0) — physical table, materialized via SP
+        log.info("[5/5] Auditing cn_stock_leader_score_daily (materialized table)...")
         leader_stats = conn.execute(text("""
-            SELECT MAX(trade_date) as last_d, 
+            SELECT MAX(trade_date) as last_d,
                    SUM(CASE WHEN leader_score IS NULL THEN 1 ELSE 0 END) / COUNT(*) * 100 as null_score
-            FROM cn_stock_leader_score_v2
+            FROM cn_stock_leader_score_daily
         """)).mappings().first()
 
         # Final logic for scoring

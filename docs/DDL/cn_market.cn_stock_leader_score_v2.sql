@@ -25,7 +25,9 @@ WITH base AS (
         COALESCE(b.total_mv, b.circ_mv) AS market_cap,
         b.total_mv,
         b.circ_mv
-    FROM cn_stock_leader_score_v1 v1
+    FROM cn_market.cn_stock_leader_score_v1 v1
+    -- Use fully qualified schema for the upstream view to avoid
+    -- CREATE VIEW dependency resolution edge cases in mixed-schema environments.
     LEFT JOIN cn_stock_daily_basic b
       ON (b.symbol COLLATE utf8mb4_unicode_ci) = v1.symbol
      AND b.trade_date = v1.trade_date

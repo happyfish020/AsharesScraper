@@ -1,15 +1,17 @@
 -- cn_market.cn_stock_leader_sw_l1_latest_v
 -- Latest leader-score snapshot joined with SW L1 mapping and same-date SW daily行情.
+-- Data source changed from cn_stock_leader_score_v2 (view) to
+-- cn_stock_leader_score_daily (materialized table via SP).
 
 CREATE OR REPLACE
 ALGORITHM = UNDEFINED VIEW `cn_stock_leader_sw_l1_latest_v` AS
 WITH leader_latest AS (
     SELECT MAX(trade_date) AS trade_date
-    FROM cn_stock_leader_score_v2
+    FROM cn_stock_leader_score_daily
 ),
 leader_base AS (
     SELECT l.*
-    FROM cn_stock_leader_score_v2 l
+    FROM cn_stock_leader_score_daily l
     JOIN leader_latest d
       ON l.trade_date = d.trade_date
 ),

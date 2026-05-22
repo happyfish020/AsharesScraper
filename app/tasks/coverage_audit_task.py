@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 from dataclasses import dataclass
 import math
 from typing import List, Optional
@@ -9,6 +9,35 @@ import akshare as ak
 
 from app.utils.wireguard_helper import activate_tunnel, switch_wire_guard
 import os 
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return int(str(raw).strip())
+    except Exception:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return float(str(raw).strip())
+    except Exception:
+        return default
+
+
 @dataclass
 class CoverageAuditTask:
     name: str = "CoverageAudit"
@@ -76,6 +105,8 @@ class CoverageAuditTask:
           - 鎸囨暟 GAP + health
         """
         cfg = self.ctx.config
+        self.audit_reports_dir = os.path.abspath(getattr(cfg, "audit_reports_dir", self.audit_reports_dir))
+        os.makedirs(self.audit_reports_dir, exist_ok=True)
         base_index = "sh000300"  # 鎴?"sh000001"
     
         max_retries = 8
@@ -114,8 +145,12 @@ class CoverageAuditTask:
                 end_date=end_date,
             )
             
-            gap_df.to_csv(os.path.join(cfg.audit_reports_dir, "audit_index_gap.csv"), index=False)
-            window_start_df.to_csv(os.path.join(cfg.audit_reports_dir, "audit_index_window_start.csv"), index=False)
+            index_gap_path = os.path.join(self.audit_reports_dir, "audit_index_gap.csv")
+            index_window_path = os.path.join(self.audit_reports_dir, "audit_index_window_start.csv")
+            gap_df.to_csv(index_gap_path, index=False)
+            window_start_df.to_csv(index_window_path, index=False)
+            self.log.info(f"指数 GAP 明细报告: {index_gap_path}")
+            self.log.info(f"指数 WINDOW_START 明细报告: {index_window_path}")
             
             ##############################################################
             stock_missing_df = self.audit_stock_missing_days(
@@ -124,7 +159,9 @@ class CoverageAuditTask:
                 start_date=start_date,
                 end_date=end_date,
             )
-            stock_missing_df.to_csv(os.path.join(self.audit_reports_dir, "audit_stock_missing.csv"), index=False)
+            stock_missing_path = os.path.join(self.audit_reports_dir, "audit_stock_missing.csv")
+            stock_missing_df.to_csv(stock_missing_path, index=False)
+            self.log.info(f"股票缺失明细报告: {stock_missing_path}")
             
             if len(stock_missing_df) >0:
                 return stock_missing_df['symbol'].tolist()
@@ -399,8 +436,15 @@ class CoverageAuditTask:
                     {
                         "symbol": symbol,
                         "missing_type": "WINDOW_START",
+                        "missing_reason": "WINDOW_START",
                         "missing_date": window_start_date.strftime("%Y-%m-%d"),
+                        "expected_trade_date": window_start_date.strftime("%Y-%m-%d"),
                         "missing_count": len(continuous_from_start),
+                        "first_trade_date": first_trade_date.strftime("%Y-%m-%d") if first_trade_date is not None and not pd.isna(first_trade_date) else "",
+                        "last_trade_date": last_trade_date.strftime("%Y-%m-%d") if last_trade_date is not None and not pd.isna(last_trade_date) else "",
+                        "skipped_by_last_trade": False,
+                        "source_table": "cn_stock_daily_price",
+                        "audit_version": "v3(last_trade_date_guard)",
                     }
                 )
 
@@ -410,25 +454,122 @@ class CoverageAuditTask:
                     {
                         "symbol": symbol,
                         "missing_type": "GAP",
+                        "missing_reason": "GAP",
                         "missing_date": gap_date.strftime("%Y-%m-%d"),
+                        "expected_trade_date": gap_date.strftime("%Y-%m-%d"),
                         "missing_count": 1,
+                        "first_trade_date": first_trade_date.strftime("%Y-%m-%d") if first_trade_date is not None and not pd.isna(first_trade_date) else "",
+                        "last_trade_date": last_trade_date.strftime("%Y-%m-%d") if last_trade_date is not None and not pd.isna(last_trade_date) else "",
+                        "skipped_by_last_trade": False,
+                        "source_table": "cn_stock_daily_price",
+                        "audit_version": "v3(last_trade_date_guard)",
                     }
                 )
 
         result_df = pd.DataFrame(missing_records)
+
+        # Tushare/AK daily stock bars are sparse by design: a listed stock has no
+        # daily bar on suspension / no-trade days.  The old audit compared every
+        # active symbol against the market index calendar, so normal single-stock
+        # suspensions were reported as fatal cn_stock_daily_price GAPs even after
+        # a successful --refresh.
+        #
+        # v4 sparse-classification rule:
+        #   - Compute missing symbol breadth per missing_date across ALL stock missing rows,
+        #     not just GAP rows.
+        #   - Treat both GAP and WINDOW_START as non-fatal when the breadth ratio is below
+        #     V8_STOCK_DAILY_FATAL_GAP_MIN_RATIO (default 10%).  This covers:
+        #       * ordinary single-stock suspensions/no-trade days
+        #       * stocks missing at the start of an audit window because they were suspended
+        #         on the first few benchmark trading days
+        #   - Keep truly broad source/table outages fatal when the missing breadth ratio is high.
+        #
+        # The old v3.1 rule also required missing_symbols_on_date < 50.  That was too strict
+        # for 2010/2011 A-share history: 50-70 names missing out of ~2,500 symbols is only
+        # ~2-3% breadth and is still normal sparse/suspension behavior, not a table-wide gap.
+        nonfatal_df = pd.DataFrame()
+        if (
+            not result_df.empty
+            and _env_flag("V8_STOCK_DAILY_SPARSE_GAP_AS_NONFATAL", True)
+            and "missing_type" in result_df.columns
+        ):
+            missing_by_date = (
+                result_df.groupby("missing_date")["symbol"]
+                .nunique()
+                .rename("missing_symbols_on_date")
+            )
+            total_symbols = max(len(stock_symbols), 1)
+            min_ratio = _env_float("V8_STOCK_DAILY_FATAL_GAP_MIN_RATIO", 0.10)
+            # Kept only for logging/backward compatibility.  The default 0 disables
+            # count-based fatal classification; ratio is the authoritative signal.
+            min_symbols = _env_int("V8_STOCK_DAILY_FATAL_GAP_MIN_SYMBOLS", 0)
+
+            result_df = result_df.merge(
+                missing_by_date,
+                left_on="missing_date",
+                right_index=True,
+                how="left",
+            )
+            result_df["missing_symbols_on_date"] = (
+                pd.to_numeric(result_df["missing_symbols_on_date"], errors="coerce").fillna(0).astype(int)
+            )
+            result_df["audited_symbol_count"] = int(total_symbols)
+            result_df["missing_symbol_ratio_on_date"] = result_df["missing_symbols_on_date"] / float(total_symbols)
+
+            sparse_mask = result_df["missing_symbol_ratio_on_date"] < min_ratio
+
+            if sparse_mask.any():
+                nonfatal_df = result_df.loc[sparse_mask].copy()
+                nonfatal_df["original_missing_type"] = nonfatal_df["missing_type"].astype(str)
+                nonfatal_df["missing_type"] = "SUSPENSION_OR_NO_TRADE"
+                nonfatal_df["missing_reason"] = "SUSPENSION_OR_NO_TRADE"
+                nonfatal_df["audit_action"] = (
+                    "non_fatal: sparse per-symbol absence on a market trading date; "
+                    "after --refresh this is normally suspension/no-trade or window-start suspension, "
+                    "not a source-table gap"
+                )
+                nonfatal_path = os.path.join(self.audit_reports_dir, "audit_stock_non_trading_absence.csv")
+                nonfatal_df.sort_values(["symbol", "missing_date"]).to_csv(
+                    nonfatal_path, index=False, encoding="utf-8-sig"
+                )
+                self.log.info(
+                    "股票稀疏日线诊断报告: %s rows=%s fatal_threshold_symbols=%s fatal_threshold_ratio=%.4f",
+                    nonfatal_path,
+                    len(nonfatal_df),
+                    min_symbols,
+                    min_ratio,
+                )
+                result_df = result_df.loc[~sparse_mask].copy()
+
         if not result_df.empty:
             result_df = result_df.sort_values(["missing_type", "symbol", "missing_date"])
             window_count = len(result_df[result_df["missing_type"] == "WINDOW_START"])
             gap_count = len(result_df[result_df["missing_type"] == "GAP"])
             self.log.info(
-                f"股票审计完成，发现缺失 {len(result_df)} 条（WINDOW_START: {window_count}，GAP: {gap_count}）"
+                f"股票审计完成，发现致命缺失 {len(result_df)} 条（WINDOW_START: {window_count}，GAP: {gap_count}）"
+            )
+            sample_unique = ",".join(result_df["symbol"].astype(str).drop_duplicates().head(20).tolist())
+            sample_rows = ",".join(
+                (
+                    result_df["symbol"].astype(str)
+                    + ":"
+                    + result_df["missing_date"].astype(str)
+                    + ":"
+                    + result_df["missing_type"].astype(str)
+                ).head(20).tolist()
             )
             self.log.info(
                 f"审计附加统计: skipped_by_last_trade={skipped_by_last_trade}, "
-                f"missing_sample={','.join(result_df['symbol'].astype(str).head(20).tolist())}"
+                f"missing_sample_symbols_unique={sample_unique}, missing_sample_rows={sample_rows}"
             )
         else:
-            self.log.info("股票审计完成，未发现缺失数据")
+            if not nonfatal_df.empty:
+                self.log.info(
+                    "股票审计完成，未发现致命缺失；非致命停牌/无成交日诊断 %s 条",
+                    len(nonfatal_df),
+                )
+            else:
+                self.log.info("股票审计完成，未发现缺失数据")
 
         return result_df
     def audit_index_missing_days(
@@ -522,8 +663,12 @@ class CoverageAuditTask:
                     {
                         "index_code": index_code,
                         "missing_type": "WINDOW_START",
+                        "missing_reason": "WINDOW_START",
                         "missing_date": window_start_date.strftime("%Y-%m-%d"),
+                        "expected_trade_date": window_start_date.strftime("%Y-%m-%d"),
                         "missing_count": len(continuous_from_start),
+                        "source_table": "cn_index_daily_price",
+                        "audit_version": "v3(index_window_start_separated)",
                     }
                 )
 
@@ -533,8 +678,12 @@ class CoverageAuditTask:
                     {
                         "index_code": index_code,
                         "missing_type": "GAP",
+                        "missing_reason": "GAP",
                         "missing_date": gap_date.strftime("%Y-%m-%d"),
+                        "expected_trade_date": gap_date.strftime("%Y-%m-%d"),
                         "missing_count": 1,
+                        "source_table": "cn_index_daily_price",
+                        "audit_version": "v3(index_window_start_separated)",
                     }
                 )
 

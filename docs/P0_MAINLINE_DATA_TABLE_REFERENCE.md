@@ -86,7 +86,7 @@ This document describes every table involved in the **P0 Mainline Data Foundatio
 | **Source** | Built by [`build_local_industry_map_hist.py`](scripts/build_local_industry_map_hist.py) from Tushare `index_member_all` API + existing `cn_board_member_map_d` |
 | **Key Columns** | `symbol`, `industry_id`, `industry_name`, `industry_level` (L1/L2/L3), `in_date`, `out_date`, `is_manual_override`, `source` |
 | **PK** | `(symbol, industry_id, in_date)` |
-| **Collation** | `utf8mb4_0900_ai_ci` |
+| **Collation** | `utf8mb4_unicode_ci` |
 | **Used By** | [`build_local_industry_proxy_daily.py`](scripts/build_local_industry_proxy_daily.py) — JOINs on `symbol` + date range to determine which stocks belong to each industry on each trade date |
 
 ### [`cn_local_industry_master`](data_pipeline/builders/sw_industry_master.py:1)
@@ -169,7 +169,7 @@ This document describes every table involved in the **P0 Mainline Data Foundatio
 | | `industry_level` — L1/L2/L3 |
 | | `source` — always `'local_proxy_from_stock_daily'` |
 | **PK** | `(industry_id, trade_date)` |
-| **Collation** | `utf8mb4_0900_ai_ci` |
+| **Collation** | `utf8mb4_unicode_ci` |
 | **Used By** | Downstream GA-layer tables (radar, pulse, strength) |
 
 ### [`cn_industry_capital_flow_daily`](data_pipeline/builders/industry_capital_flow.py)
@@ -321,8 +321,8 @@ Different tables use different collations. All `symbol`-based JOINs between thes
 | `cn_stock_daily_price` | `utf8mb4_unicode_ci` |
 | `cn_stock_daily_basic` | `utf8mb4_general_ci` |
 | `cn_stock_leader_score_daily` | `utf8mb4_unicode_ci` |
-| `cn_local_industry_map_hist` | `utf8mb4_0900_ai_ci` |
-| `cn_local_industry_proxy_daily` | `utf8mb4_0900_ai_ci` |
+| `cn_local_industry_map_hist` | `utf8mb4_unicode_ci` |
+| `cn_local_industry_proxy_daily` | `utf8mb4_unicode_ci` |
 | `cn_sw_industry_daily` | `utf8mb4_general_ci` |
 | `cn_stock_income` | `utf8mb4_general_ci` |
 | `cn_stock_balancesheet` | `utf8mb4_general_ci` |
@@ -331,3 +331,28 @@ Different tables use different collations. All `symbol`-based JOINs between thes
 | `cn_local_stock_balancesheet_q` | `utf8mb4_unicode_ci` |
 | `cn_local_stock_fina_indicator_q` | `utf8mb4_unicode_ci` |
 | `cn_stock_fundamental_daily` | `utf8mb4_unicode_ci` |
+
+---
+
+## 9. V7/V8 Crosswalk
+
+Before replacing V7 SW L1 trading-sector inputs with V8 local-industry inputs, run:
+
+- [`scripts/build_v7_v8_industry_crosswalk.py`](../scripts/build_v7_v8_industry_crosswalk.py)
+
+This builder reads:
+
+- `cn_local_industry_map_hist`
+- Tushare `index_classify`
+- Tushare `index_member_all`
+
+It writes:
+
+- `cn_v7_v8_industry_crosswalk`
+- CSV / markdown diagnostics under `reports/analysis/`
+
+Reference:
+
+- [`docs/P0_SW_CROSSWALK_BUILDER.md`](./P0_SW_CROSSWALK_BUILDER.md)
+- [`docs/P0_TUSHARE_SW_REPLACEMENT_SOURCES.md`](./P0_TUSHARE_SW_REPLACEMENT_SOURCES.md)
+- [`docs/V8_TABLES_DAILY_AND_BACKFILL_RUNBOOK.md`](./V8_TABLES_DAILY_AND_BACKFILL_RUNBOOK.md)

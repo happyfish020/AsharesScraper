@@ -1,0 +1,6 @@
+﻿trade_date,total_mainlines,state_counts,top_trend_expansion,top_top_decay,risk_off_flag,row_count_written
+2026-04-17,31,{'BOTTOM_REPAIR': 31},N/A,N/A,NO,31
+2026-04-20,31,{'BOTTOM_REPAIR': 31},N/A,N/A,NO,31
+2026-04-21,31,"{'RISK_OFF': 27, 'UNKNOWN': 4}",N/A,N/A,YES,31
+2026-04-22,31,{'BOTTOM_REPAIR': 31},N/A,N/A,NO,31
+2026-04-23,31,"{'RISK_OFF': 19, 'UNKNOWN': 12}",N/A,N/A,YES,31

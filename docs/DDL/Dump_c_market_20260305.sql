@@ -158,7 +158,7 @@ CREATE TABLE `cn_board_concept_member_hist` (
   PRIMARY KEY (`concept_id`,`symbol`,`valid_from`),
   KEY `idx_cbcmh_symbol_valid` (`symbol`,`valid_from`,`valid_to`),
   KEY `idx_cbcmh_concept_valid` (`concept_id`,`valid_from`,`valid_to`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -176,7 +176,7 @@ CREATE TABLE `cn_board_concept_member_stg` (
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`asof_date`,`concept_id`,`symbol`),
   KEY `idx_cbcms_asof_symbol` (`asof_date`,`symbol`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -263,7 +263,7 @@ CREATE TABLE `cn_board_industry_member_hist` (
   PRIMARY KEY (`board_id`,`symbol`,`valid_from`),
   KEY `idx_cbimh_symbol_valid` (`symbol`,`valid_from`,`valid_to`),
   KEY `idx_cbimh_board_valid` (`board_id`,`valid_from`,`valid_to`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -281,7 +281,7 @@ CREATE TABLE `cn_board_industry_member_stg` (
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`asof_date`,`board_id`,`symbol`),
   KEY `idx_cbims_asof_symbol` (`asof_date`,`symbol`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -300,7 +300,7 @@ CREATE TABLE `cn_board_member_map_d` (
   KEY `idx_cbmmd_symbol_date` (`symbol`,`trade_date`),
   KEY `idx_cbmmd_type_sector_date` (`sector_type`,`sector_id`,`trade_date`),
   KEY `idx_cbmmd_date_type_symbol_sector` (`trade_date`,`sector_type`,`symbol`,`sector_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -1039,7 +1039,7 @@ SET character_set_client = @saved_cs_client;
 /*!50003 SET @saved_col_connection = @@collation_connection */ ;
 /*!50003 SET character_set_client  = utf8mb4 */ ;
 /*!50003 SET character_set_results = utf8mb4 */ ;
-/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET collation_connection  = utf8mb4_unicode_ci */ ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
@@ -1175,7 +1175,7 @@ DELIMITER ;
 /*!50003 SET @saved_col_connection = @@collation_connection */ ;
 /*!50003 SET character_set_client  = utf8mb4 */ ;
 /*!50003 SET character_set_results = utf8mb4 */ ;
-/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET collation_connection  = utf8mb4_unicode_ci */ ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
@@ -1247,7 +1247,7 @@ DELIMITER ;
 /*!50003 SET @saved_col_connection = @@collation_connection */ ;
 /*!50003 SET character_set_client  = utf8mb4 */ ;
 /*!50003 SET character_set_results = utf8mb4 */ ;
-/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET collation_connection  = utf8mb4_unicode_ci */ ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
@@ -1302,7 +1302,7 @@ DELIMITER ;
 /*!50003 SET @saved_col_connection = @@collation_connection */ ;
 /*!50003 SET character_set_client  = utf8mb4 */ ;
 /*!50003 SET character_set_results = utf8mb4 */ ;
-/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET collation_connection  = utf8mb4_unicode_ci */ ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
@@ -1363,7 +1363,7 @@ DELIMITER ;
 /*!50003 SET @saved_col_connection = @@collation_connection */ ;
 /*!50003 SET character_set_client  = utf8mb4 */ ;
 /*!50003 SET character_set_results = utf8mb4 */ ;
-/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET collation_connection  = utf8mb4_unicode_ci */ ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
@@ -1382,7 +1382,7 @@ DELIMITER ;
 /*!50003 SET @saved_col_connection = @@collation_connection */ ;
 /*!50003 SET character_set_client  = utf8mb4 */ ;
 /*!50003 SET character_set_results = utf8mb4 */ ;
-/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET collation_connection  = utf8mb4_unicode_ci */ ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
@@ -1473,7 +1473,7 @@ DELIMITER ;
 /*!50003 SET @saved_col_connection = @@collation_connection */ ;
 /*!50003 SET character_set_client  = utf8mb4 */ ;
 /*!50003 SET character_set_results = utf8mb4 */ ;
-/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET collation_connection  = utf8mb4_unicode_ci */ ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
@@ -1492,7 +1492,7 @@ DELIMITER ;
 /*!50003 SET @saved_col_connection = @@collation_connection */ ;
 /*!50003 SET character_set_client  = utf8mb4 */ ;
 /*!50003 SET character_set_results = utf8mb4 */ ;
-/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET collation_connection  = utf8mb4_unicode_ci */ ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
@@ -1567,7 +1567,7 @@ DELIMITER ;
 /*!50003 SET @saved_col_connection = @@collation_connection */ ;
 /*!50003 SET character_set_client  = utf8mb4 */ ;
 /*!50003 SET character_set_results = utf8mb4 */ ;
-/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET collation_connection  = utf8mb4_unicode_ci */ ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
@@ -1661,7 +1661,7 @@ DELIMITER ;
 /*!50003 SET @saved_col_connection = @@collation_connection */ ;
 /*!50003 SET character_set_client  = utf8mb4 */ ;
 /*!50003 SET character_set_results = utf8mb4 */ ;
-/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET collation_connection  = utf8mb4_unicode_ci */ ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
@@ -1911,7 +1911,7 @@ DELIMITER ;
 /*!50003 SET @saved_col_connection = @@collation_connection */ ;
 /*!50003 SET character_set_client  = utf8mb4 */ ;
 /*!50003 SET character_set_results = utf8mb4 */ ;
-/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET collation_connection  = utf8mb4_unicode_ci */ ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
@@ -2047,7 +2047,7 @@ DELIMITER ;
 /*!50003 SET @saved_col_connection = @@collation_connection */ ;
 /*!50003 SET character_set_client  = utf8mb4 */ ;
 /*!50003 SET character_set_results = utf8mb4 */ ;
-/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET collation_connection  = utf8mb4_unicode_ci */ ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
@@ -2120,7 +2120,7 @@ DELIMITER ;
 /*!50003 SET @saved_col_connection = @@collation_connection */ ;
 /*!50003 SET character_set_client  = utf8mb4 */ ;
 /*!50003 SET character_set_results = utf8mb4 */ ;
-/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET collation_connection  = utf8mb4_unicode_ci */ ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
@@ -2180,7 +2180,7 @@ DELIMITER ;
 /*!50003 SET @saved_col_connection = @@collation_connection */ ;
 /*!50003 SET character_set_client  = utf8mb4 */ ;
 /*!50003 SET character_set_results = utf8mb4 */ ;
-/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET collation_connection  = utf8mb4_unicode_ci */ ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
@@ -2227,7 +2227,7 @@ DELIMITER ;
 /*!50003 SET @saved_col_connection = @@collation_connection */ ;
 /*!50003 SET character_set_client  = utf8mb4 */ ;
 /*!50003 SET character_set_results = utf8mb4 */ ;
-/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET collation_connection  = utf8mb4_unicode_ci */ ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
@@ -2371,7 +2371,7 @@ DELIMITER ;
 /*!50003 SET @saved_col_connection = @@collation_connection */ ;
 /*!50003 SET character_set_client  = utf8mb4 */ ;
 /*!50003 SET character_set_results = utf8mb4 */ ;
-/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET collation_connection  = utf8mb4_unicode_ci */ ;
 /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
 /*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
 DELIMITER ;;
@@ -2464,7 +2464,7 @@ DELIMITER ;
 /*!50001 SET @saved_col_connection     = @@collation_connection */;
 /*!50001 SET character_set_client      = utf8mb4 */;
 /*!50001 SET character_set_results     = utf8mb4 */;
-/*!50001 SET collation_connection      = utf8mb4_0900_ai_ci */;
+/*!50001 SET collation_connection      = utf8mb4_unicode_ci */;
 /*!50001 CREATE ALGORITHM=UNDEFINED */
 /*!50013 DEFINER=`cn_opr`@`localhost` SQL SECURITY DEFINER */
 /*!50001 VIEW `cn_board_concept_eod_agg_v` AS select 'CONCEPT' AS `sector_type`,`m`.`sector_id` AS `sector_id`,`p`.`TRADE_DATE` AS `trade_date`,count(0) AS `members`,sum(ifnull(`p`.`AMOUNT`,0)) AS `amount_sum`,avg((case when ((coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) is not null) and (coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) <> 0)) then ((`p`.`CLOSE` / coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`))) - 1) when (`p`.`CHG_PCT` is not null) then (case when (abs(`p`.`CHG_PCT`) > 1) then (`p`.`CHG_PCT` / 100) else `p`.`CHG_PCT` end) else NULL end)) AS `avg_ret`,avg((case when ((coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) is not null) and (coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) <> 0)) then ((`p`.`CLOSE` / coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`))) - 1) when (`p`.`CHG_PCT` is not null) then (case when (abs(`p`.`CHG_PCT`) > 1) then (`p`.`CHG_PCT` / 100) else `p`.`CHG_PCT` end) else NULL end)) AS `median_ret`,avg((case when ((coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) is not null) and (coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) <> 0)) then ((`p`.`CLOSE` / coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`))) - 1) when (`p`.`CHG_PCT` is not null) then (case when (abs(`p`.`CHG_PCT`) > 1) then (`p`.`CHG_PCT` / 100) else `p`.`CHG_PCT` end) else NULL end)) AS `eqw_ret`,avg((case when ((case when ((coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) is not null) and (coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) <> 0)) then ((`p`.`CLOSE` / coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`))) - 1) when (`p`.`CHG_PCT` is not null) then (case when (abs(`p`.`CHG_PCT`) > 1) then (`p`.`CHG_PCT` / 100) else `p`.`CHG_PCT` end) else NULL end) is null) then NULL when ((case when ((coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) is not null) and (coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) <> 0)) then ((`p`.`CLOSE` / coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`))) - 1) when (`p`.`CHG_PCT` is not null) then (case when (abs(`p`.`CHG_PCT`) > 1) then (`p`.`CHG_PCT` / 100) else `p`.`CHG_PCT` end) else NULL end) > 0) then 1 else 0 end)) AS `up_ratio` from (`cn_board_member_map_d` `m` join `cn_stock_daily_price_active_v` `p` on(((`p`.`TRADE_DATE` = `m`.`trade_date`) and (`p`.`SYMBOL` = (`m`.`symbol` collate utf8mb4_unicode_ci))))) where (`m`.`sector_type` = 'CONCEPT') group by `m`.`sector_id`,`p`.`TRADE_DATE` */;
@@ -2482,7 +2482,7 @@ DELIMITER ;
 /*!50001 SET @saved_col_connection     = @@collation_connection */;
 /*!50001 SET character_set_client      = utf8mb4 */;
 /*!50001 SET character_set_results     = utf8mb4 */;
-/*!50001 SET collation_connection      = utf8mb4_0900_ai_ci */;
+/*!50001 SET collation_connection      = utf8mb4_unicode_ci */;
 /*!50001 CREATE ALGORITHM=UNDEFINED */
 /*!50013 DEFINER=`cn_opr`@`localhost` SQL SECURITY DEFINER */
 /*!50001 VIEW `cn_board_industry_eod_agg_v` AS select 'INDUSTRY' AS `sector_type`,`m`.`sector_id` AS `sector_id`,`p`.`TRADE_DATE` AS `trade_date`,count(0) AS `members`,sum(ifnull(`p`.`AMOUNT`,0)) AS `amount_sum`,avg((case when ((coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) is not null) and (coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) <> 0)) then ((`p`.`CLOSE` / coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`))) - 1) when (`p`.`CHG_PCT` is not null) then (case when (abs(`p`.`CHG_PCT`) > 1) then (`p`.`CHG_PCT` / 100) else `p`.`CHG_PCT` end) else NULL end)) AS `avg_ret`,avg((case when ((coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) is not null) and (coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) <> 0)) then ((`p`.`CLOSE` / coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`))) - 1) when (`p`.`CHG_PCT` is not null) then (case when (abs(`p`.`CHG_PCT`) > 1) then (`p`.`CHG_PCT` / 100) else `p`.`CHG_PCT` end) else NULL end)) AS `median_ret`,avg((case when ((coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) is not null) and (coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) <> 0)) then ((`p`.`CLOSE` / coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`))) - 1) when (`p`.`CHG_PCT` is not null) then (case when (abs(`p`.`CHG_PCT`) > 1) then (`p`.`CHG_PCT` / 100) else `p`.`CHG_PCT` end) else NULL end)) AS `eqw_ret`,avg((case when ((case when ((coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) is not null) and (coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) <> 0)) then ((`p`.`CLOSE` / coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`))) - 1) when (`p`.`CHG_PCT` is not null) then (case when (abs(`p`.`CHG_PCT`) > 1) then (`p`.`CHG_PCT` / 100) else `p`.`CHG_PCT` end) else NULL end) is null) then NULL when ((case when ((coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) is not null) and (coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`)) <> 0)) then ((`p`.`CLOSE` / coalesce(`p`.`PRE_CLOSE`,(`p`.`CLOSE` - `p`.`CHANGE`))) - 1) when (`p`.`CHG_PCT` is not null) then (case when (abs(`p`.`CHG_PCT`) > 1) then (`p`.`CHG_PCT` / 100) else `p`.`CHG_PCT` end) else NULL end) > 0) then 1 else 0 end)) AS `up_ratio` from (`cn_board_member_map_d` `m` join `cn_stock_daily_price_active_v` `p` on(((`p`.`TRADE_DATE` = `m`.`trade_date`) and (`p`.`SYMBOL` = (`m`.`symbol` collate utf8mb4_unicode_ci))))) where (`m`.`sector_type` = 'INDUSTRY') group by `m`.`sector_id`,`p`.`TRADE_DATE` */;
@@ -2500,7 +2500,7 @@ DELIMITER ;
 /*!50001 SET @saved_col_connection     = @@collation_connection */;
 /*!50001 SET character_set_client      = utf8mb4 */;
 /*!50001 SET character_set_results     = utf8mb4 */;
-/*!50001 SET collation_connection      = utf8mb4_0900_ai_ci */;
+/*!50001 SET collation_connection      = utf8mb4_unicode_ci */;
 /*!50001 CREATE ALGORITHM=UNDEFINED */
 /*!50013 DEFINER=`cn_opr`@`localhost` SQL SECURITY DEFINER */
 /*!50001 VIEW `cn_sector_energy_v` AS with `x` as (select `cn_sector_rotation_state_v`.`trade_date` AS `trade_date`,`cn_sector_rotation_state_v`.`sector_type` AS `sector_type`,`cn_sector_rotation_state_v`.`sector_id` AS `sector_id`,`cn_sector_rotation_state_v`.`amount_sum` AS `amount_sum`,`cn_sector_rotation_state_v`.`amt_impulse` AS `amt_impulse`,`cn_sector_rotation_state_v`.`up_ratio` AS `up_ratio`,`cn_sector_rotation_state_v`.`mom_10` AS `mom_10`,`cn_sector_rotation_state_v`.`mom_20` AS `mom_20`,`cn_sector_rotation_state_v`.`up_slope` AS `up_slope`,`cn_sector_rotation_state_v`.`cov_10` AS `cov_10` from `cn_sector_rotation_state_v`), `r` as (select `x`.`trade_date` AS `trade_date`,`x`.`sector_type` AS `sector_type`,`x`.`sector_id` AS `sector_id`,`x`.`amount_sum` AS `amount_sum`,`x`.`amt_impulse` AS `amt_impulse`,`x`.`up_ratio` AS `up_ratio`,`x`.`mom_10` AS `mom_10`,`x`.`mom_20` AS `mom_20`,`x`.`up_slope` AS `up_slope`,`x`.`cov_10` AS `cov_10`,percent_rank() OVER (PARTITION BY `x`.`trade_date` ORDER BY `x`.`amt_impulse` )  AS `pr_amt_imp`,percent_rank() OVER (PARTITION BY `x`.`trade_date` ORDER BY `x`.`amount_sum` )  AS `pr_amt_sum`,percent_rank() OVER (PARTITION BY `x`.`trade_date` ORDER BY `x`.`up_ratio` )  AS `pr_up`,percent_rank() OVER (PARTITION BY `x`.`trade_date` ORDER BY `x`.`up_slope` )  AS `pr_up_slope`,percent_rank() OVER (PARTITION BY `x`.`trade_date` ORDER BY `x`.`mom_10` )  AS `pr_m10`,percent_rank() OVER (PARTITION BY `x`.`trade_date` ORDER BY `x`.`mom_20` )  AS `pr_m20`,percent_rank() OVER (PARTITION BY `x`.`trade_date` ORDER BY -(`x`.`cov_10`) )  AS `pr_cov_good` from `x`), `s` as (select `r`.`trade_date` AS `trade_date`,`r`.`sector_type` AS `sector_type`,`r`.`sector_id` AS `sector_id`,`r`.`amount_sum` AS `amount_sum`,`r`.`amt_impulse` AS `amt_impulse`,`r`.`up_ratio` AS `up_ratio`,`r`.`mom_10` AS `mom_10`,`r`.`mom_20` AS `mom_20`,`r`.`up_slope` AS `up_slope`,`r`.`cov_10` AS `cov_10`,`r`.`pr_amt_imp` AS `pr_amt_imp`,`r`.`pr_amt_sum` AS `pr_amt_sum`,`r`.`pr_up` AS `pr_up`,`r`.`pr_up_slope` AS `pr_up_slope`,`r`.`pr_m10` AS `pr_m10`,`r`.`pr_m20` AS `pr_m20`,`r`.`pr_cov_good` AS `pr_cov_good`,(((((((0.35 * `r`.`pr_amt_imp`) + (0.10 * `r`.`pr_amt_sum`)) + (0.20 * `r`.`pr_up`)) + (0.10 * `r`.`pr_up_slope`)) + (0.15 * `r`.`pr_m10`)) + (0.05 * `r`.`pr_m20`)) + (0.05 * `r`.`pr_cov_good`)) AS `energy_raw` from `r`) select `s`.`trade_date` AS `trade_date`,`s`.`sector_type` AS `sector_type`,`s`.`sector_id` AS `sector_id`,(100 * `s`.`energy_raw`) AS `energy_score`,percent_rank() OVER (PARTITION BY `s`.`trade_date` ORDER BY `s`.`energy_raw` )  AS `energy_pct` from `s` */;
@@ -2518,7 +2518,7 @@ DELIMITER ;
 /*!50001 SET @saved_col_connection     = @@collation_connection */;
 /*!50001 SET character_set_client      = utf8mb4 */;
 /*!50001 SET character_set_results     = utf8mb4 */;
-/*!50001 SET collation_connection      = utf8mb4_0900_ai_ci */;
+/*!50001 SET collation_connection      = utf8mb4_unicode_ci */;
 /*!50001 CREATE ALGORITHM=UNDEFINED */
 /*!50013 DEFINER=`cn_opr`@`localhost` SQL SECURITY DEFINER */
 /*!50001 VIEW `cn_sector_eod_agg_v` AS select `cn_board_industry_eod_agg_v`.`sector_type` AS `SECTOR_TYPE`,`cn_board_industry_eod_agg_v`.`sector_id` AS `SECTOR_ID`,`cn_board_industry_eod_agg_v`.`trade_date` AS `TRADE_DATE`,`cn_board_industry_eod_agg_v`.`members` AS `MEMBERS`,`cn_board_industry_eod_agg_v`.`amount_sum` AS `AMOUNT_SUM`,`cn_board_industry_eod_agg_v`.`avg_ret` AS `AVG_RET`,`cn_board_industry_eod_agg_v`.`median_ret` AS `MEDIAN_RET`,`cn_board_industry_eod_agg_v`.`eqw_ret` AS `EQW_RET`,`cn_board_industry_eod_agg_v`.`up_ratio` AS `UP_RATIO` from `cn_board_industry_eod_agg_v` union all select `cn_board_concept_eod_agg_v`.`sector_type` AS `SECTOR_TYPE`,`cn_board_concept_eod_agg_v`.`sector_id` AS `SECTOR_ID`,`cn_board_concept_eod_agg_v`.`trade_date` AS `TRADE_DATE`,`cn_board_concept_eod_agg_v`.`members` AS `MEMBERS`,`cn_board_concept_eod_agg_v`.`amount_sum` AS `AMOUNT_SUM`,`cn_board_concept_eod_agg_v`.`avg_ret` AS `AVG_RET`,`cn_board_concept_eod_agg_v`.`median_ret` AS `MEDIAN_RET`,`cn_board_concept_eod_agg_v`.`eqw_ret` AS `EQW_RET`,`cn_board_concept_eod_agg_v`.`up_ratio` AS `UP_RATIO` from `cn_board_concept_eod_agg_v` */;
@@ -2536,7 +2536,7 @@ DELIMITER ;
 /*!50001 SET @saved_col_connection     = @@collation_connection */;
 /*!50001 SET character_set_client      = utf8mb4 */;
 /*!50001 SET character_set_results     = utf8mb4 */;
-/*!50001 SET collation_connection      = utf8mb4_0900_ai_ci */;
+/*!50001 SET collation_connection      = utf8mb4_unicode_ci */;
 /*!50001 CREATE ALGORITHM=UNDEFINED */
 /*!50013 DEFINER=`cn_opr`@`localhost` SQL SECURITY DEFINER */
 /*!50001 VIEW `cn_sector_eod_feature_v` AS select `cn_sector_eod_agg_v`.`SECTOR_TYPE` AS `sector_type`,`cn_sector_eod_agg_v`.`SECTOR_ID` AS `sector_id`,`cn_sector_eod_agg_v`.`TRADE_DATE` AS `trade_date`,`cn_sector_eod_agg_v`.`MEMBERS` AS `members`,`cn_sector_eod_agg_v`.`AMOUNT_SUM` AS `amount_sum`,`cn_sector_eod_agg_v`.`AVG_RET` AS `avg_ret`,`cn_sector_eod_agg_v`.`MEDIAN_RET` AS `median_ret`,`cn_sector_eod_agg_v`.`EQW_RET` AS `eqw_ret`,`cn_sector_eod_agg_v`.`UP_RATIO` AS `up_ratio`,count(`cn_sector_eod_agg_v`.`EQW_RET`) OVER (PARTITION BY `cn_sector_eod_agg_v`.`SECTOR_TYPE`,`cn_sector_eod_agg_v`.`SECTOR_ID` ORDER BY `cn_sector_eod_agg_v`.`TRADE_DATE` ROWS BETWEEN 4 PRECEDING AND CURRENT ROW)  AS `cov_5`,count(`cn_sector_eod_agg_v`.`EQW_RET`) OVER (PARTITION BY `cn_sector_eod_agg_v`.`SECTOR_TYPE`,`cn_sector_eod_agg_v`.`SECTOR_ID` ORDER BY `cn_sector_eod_agg_v`.`TRADE_DATE` ROWS BETWEEN 9 PRECEDING AND CURRENT ROW)  AS `cov_10`,count(`cn_sector_eod_agg_v`.`EQW_RET`) OVER (PARTITION BY `cn_sector_eod_agg_v`.`SECTOR_TYPE`,`cn_sector_eod_agg_v`.`SECTOR_ID` ORDER BY `cn_sector_eod_agg_v`.`TRADE_DATE` ROWS BETWEEN 19 PRECEDING AND CURRENT ROW)  AS `cov_20`,avg(`cn_sector_eod_agg_v`.`AMOUNT_SUM`) OVER (PARTITION BY `cn_sector_eod_agg_v`.`SECTOR_TYPE`,`cn_sector_eod_agg_v`.`SECTOR_ID` ORDER BY `cn_sector_eod_agg_v`.`TRADE_DATE` ROWS BETWEEN 19 PRECEDING AND CURRENT ROW)  AS `amt_ma20`,(case when (avg(`cn_sector_eod_agg_v`.`AMOUNT_SUM`) OVER (PARTITION BY `cn_sector_eod_agg_v`.`SECTOR_TYPE`,`cn_sector_eod_agg_v`.`SECTOR_ID` ORDER BY `cn_sector_eod_agg_v`.`TRADE_DATE` ROWS BETWEEN 19 PRECEDING AND CURRENT ROW)  = 0) then NULL else (`cn_sector_eod_agg_v`.`AMOUNT_SUM` / avg(`cn_sector_eod_agg_v`.`AMOUNT_SUM`) OVER (PARTITION BY `cn_sector_eod_agg_v`.`SECTOR_TYPE`,`cn_sector_eod_agg_v`.`SECTOR_ID` ORDER BY `cn_sector_eod_agg_v`.`TRADE_DATE` ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) ) end) AS `amt_impulse`,avg(`cn_sector_eod_agg_v`.`UP_RATIO`) OVER (PARTITION BY `cn_sector_eod_agg_v`.`SECTOR_TYPE`,`cn_sector_eod_agg_v`.`SECTOR_ID` ORDER BY `cn_sector_eod_agg_v`.`TRADE_DATE` ROWS BETWEEN 4 PRECEDING AND CURRENT ROW)  AS `up_ma5`,(`cn_sector_eod_agg_v`.`UP_RATIO` - avg(`cn_sector_eod_agg_v`.`UP_RATIO`) OVER (PARTITION BY `cn_sector_eod_agg_v`.`SECTOR_TYPE`,`cn_sector_eod_agg_v`.`SECTOR_ID` ORDER BY `cn_sector_eod_agg_v`.`TRADE_DATE` ROWS BETWEEN 4 PRECEDING AND CURRENT ROW) ) AS `up_slope`,(exp(sum(ln((1 + ifnull(`cn_sector_eod_agg_v`.`EQW_RET`,0)))) OVER (PARTITION BY `cn_sector_eod_agg_v`.`SECTOR_TYPE`,`cn_sector_eod_agg_v`.`SECTOR_ID` ORDER BY `cn_sector_eod_agg_v`.`TRADE_DATE` ROWS BETWEEN 4 PRECEDING AND CURRENT ROW) ) - 1) AS `mom_5`,(exp(sum(ln((1 + ifnull(`cn_sector_eod_agg_v`.`EQW_RET`,0)))) OVER (PARTITION BY `cn_sector_eod_agg_v`.`SECTOR_TYPE`,`cn_sector_eod_agg_v`.`SECTOR_ID` ORDER BY `cn_sector_eod_agg_v`.`TRADE_DATE` ROWS BETWEEN 9 PRECEDING AND CURRENT ROW) ) - 1) AS `mom_10`,(exp(sum(ln((1 + ifnull(`cn_sector_eod_agg_v`.`EQW_RET`,0)))) OVER (PARTITION BY `cn_sector_eod_agg_v`.`SECTOR_TYPE`,`cn_sector_eod_agg_v`.`SECTOR_ID` ORDER BY `cn_sector_eod_agg_v`.`TRADE_DATE` ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) ) - 1) AS `mom_20` from `cn_sector_eod_agg_v` */;
@@ -2554,7 +2554,7 @@ DELIMITER ;
 /*!50001 SET @saved_col_connection     = @@collation_connection */;
 /*!50001 SET character_set_client      = utf8mb4 */;
 /*!50001 SET character_set_results     = utf8mb4 */;
-/*!50001 SET collation_connection      = utf8mb4_0900_ai_ci */;
+/*!50001 SET collation_connection      = utf8mb4_unicode_ci */;
 /*!50001 CREATE ALGORITHM=UNDEFINED */
 /*!50013 DEFINER=`cn_opr`@`localhost` SQL SECURITY DEFINER */
 /*!50001 VIEW `cn_sector_rotation_named_v` AS select `s`.`trade_date` AS `trade_date`,date_format(cast(`s`.`trade_date` as date),'%Y-%m-%d') AS `trading_date`,`s`.`sector_type` AS `sector_type`,`s`.`sector_id` AS `sector_id`,(case when (`s`.`sector_type` = 'INDUSTRY') then `im`.`board_name` when (`s`.`sector_type` = 'CONCEPT') then `cm`.`concept_name` else NULL end) AS `sector_name`,`s`.`state` AS `state`,`s`.`score` AS `score`,`s`.`members` AS `members`,`s`.`cov_5` AS `cov_5`,`s`.`cov_10` AS `cov_10`,`s`.`cov_20` AS `cov_20`,`s`.`mom_5` AS `mom_5`,`s`.`mom_10` AS `mom_10`,`s`.`mom_20` AS `mom_20`,`s`.`amt_impulse` AS `amt_impulse`,`s`.`up_ratio` AS `up_ratio`,`s`.`up_ma5` AS `up_ma5`,`s`.`up_slope` AS `up_slope` from ((`cn_sector_rotation_state_v` `s` left join (select `t`.`board_id` AS `board_id`,`t`.`board_name` AS `board_name` from (select `m`.`BOARD_ID` AS `board_id`,`m`.`BOARD_NAME` AS `board_name`,row_number() OVER (PARTITION BY `m`.`BOARD_ID` ORDER BY `m`.`ASOF_DATE` desc )  AS `rn` from `cn_board_industry_master` `m`) `t` where (`t`.`rn` = 1)) `im` on(((`s`.`sector_type` = 'INDUSTRY') and (`s`.`sector_id` = `im`.`board_id`)))) left join (select `t`.`concept_id` AS `concept_id`,`t`.`concept_name` AS `concept_name` from (select `m`.`CONCEPT_ID` AS `concept_id`,`m`.`CONCEPT_NAME` AS `concept_name`,row_number() OVER (PARTITION BY `m`.`CONCEPT_ID` ORDER BY `m`.`ASOF_DATE` desc )  AS `rn` from `cn_board_concept_master` `m`) `t` where (`t`.`rn` = 1)) `cm` on(((`s`.`sector_type` = 'CONCEPT') and (`s`.`sector_id` = `cm`.`concept_id`)))) */;
@@ -2572,7 +2572,7 @@ DELIMITER ;
 /*!50001 SET @saved_col_connection     = @@collation_connection */;
 /*!50001 SET character_set_client      = utf8mb4 */;
 /*!50001 SET character_set_results     = utf8mb4 */;
-/*!50001 SET collation_connection      = utf8mb4_0900_ai_ci */;
+/*!50001 SET collation_connection      = utf8mb4_unicode_ci */;
 /*!50001 CREATE ALGORITHM=UNDEFINED */
 /*!50013 DEFINER=`cn_opr`@`localhost` SQL SECURITY DEFINER */
 /*!50001 VIEW `cn_sector_rotation_ranked_v_too_slow` AS select `r`.`trade_date` AS `trade_date`,`r`.`trading_date` AS `trading_date`,`r`.`sector_type` AS `sector_type`,`r`.`sector_id` AS `sector_id`,`r`.`sector_name` AS `sector_name`,`r`.`theme_group` AS `theme_group`,`r`.`state` AS `state`,`r`.`confirm_streak` AS `confirm_streak`,`r`.`tier` AS `tier`,`r`.`tier_pri` AS `tier_pri`,`r`.`score` AS `score`,`r`.`members` AS `members`,`r`.`cov_5` AS `cov_5`,`r`.`cov_10` AS `cov_10`,`r`.`cov_20` AS `cov_20`,`r`.`mom_5` AS `mom_5`,`r`.`mom_10` AS `mom_10`,`r`.`mom_20` AS `mom_20`,`r`.`amt_impulse` AS `amt_impulse`,`r`.`up_ratio` AS `up_ratio`,`r`.`up_ma5` AS `up_ma5`,`r`.`up_slope` AS `up_slope`,`r`.`theme_rank` AS `theme_rank`,(case when (`r`.`theme_rank` = 1) then 'KEEP' else 'DUP_THEME' end) AS `theme_flag` from (select `t`.`trade_date` AS `trade_date`,`t`.`trading_date` AS `trading_date`,`t`.`sector_type` AS `sector_type`,`t`.`sector_id` AS `sector_id`,`t`.`sector_name` AS `sector_name`,`t`.`state` AS `state`,`t`.`score` AS `score`,`t`.`members` AS `members`,`t`.`cov_5` AS `cov_5`,`t`.`cov_10` AS `cov_10`,`t`.`cov_20` AS `cov_20`,`t`.`mom_5` AS `mom_5`,`t`.`mom_10` AS `mom_10`,`t`.`mom_20` AS `mom_20`,`t`.`amt_impulse` AS `amt_impulse`,`t`.`up_ratio` AS `up_ratio`,`t`.`up_ma5` AS `up_ma5`,`t`.`up_slope` AS `up_slope`,`t`.`rn_all` AS `rn_all`,`t`.`rn_conf` AS `rn_conf`,`t`.`grp_conf` AS `grp_conf`,`t`.`confirm_streak` AS `confirm_streak`,`t`.`theme_group` AS `theme_group`,`t`.`tier` AS `tier`,`t`.`tier_pri` AS `tier_pri`,row_number() OVER (PARTITION BY `t`.`trade_date`,`t`.`theme_group` ORDER BY `t`.`tier_pri`,`t`.`score` desc )  AS `theme_rank` from (select `a`.`trade_date` AS `trade_date`,`a`.`trading_date` AS `trading_date`,`a`.`sector_type` AS `sector_type`,`a`.`sector_id` AS `sector_id`,`a`.`sector_name` AS `sector_name`,`a`.`state` AS `state`,`a`.`score` AS `score`,`a`.`members` AS `members`,`a`.`cov_5` AS `cov_5`,`a`.`cov_10` AS `cov_10`,`a`.`cov_20` AS `cov_20`,`a`.`mom_5` AS `mom_5`,`a`.`mom_10` AS `mom_10`,`a`.`mom_20` AS `mom_20`,`a`.`amt_impulse` AS `amt_impulse`,`a`.`up_ratio` AS `up_ratio`,`a`.`up_ma5` AS `up_ma5`,`a`.`up_slope` AS `up_slope`,`a`.`rn_all` AS `rn_all`,`a`.`rn_conf` AS `rn_conf`,`a`.`grp_conf` AS `grp_conf`,`a`.`confirm_streak` AS `confirm_streak`,(case when ((`a`.`sector_name` like '%流感%') or (`a`.`sector_name` like '%肝炎%') or (`a`.`sector_name` like '%病毒%') or (`a`.`sector_name` like '%防治%') or (`a`.`sector_name` like '%疫苗%')) then 'MEDICAL_EVENT' when ((`a`.`sector_name` like '%中药%') or (`a`.`sector_name` like '%中医%')) then 'TCM' when ((`a`.`sector_name` like '%汽车%') or (`a`.`sector_name` like '%零部件%') or (`a`.`sector_name` like '%智能驾驶%')) then 'AUTO_CHAIN' when ((`a`.`sector_name` like '%有机硅%') or (`a`.`sector_name` like '%碳纤维%') or (`a`.`sector_name` like '%小金属%') or (`a`.`sector_name` like '%稀土%') or (`a`.`sector_name` like '%新材料%')) then 'MATERIALS' when (`a`.`sector_name` like '%核聚变%') then 'NUCLEAR_FUSION' when (`a`.`sector_name` like '%合成生物%') then 'SYNBIO' else 'OTHER' end) AS `theme_group`,(case when ((`a`.`state` = 'CONFIRM') and ((ifnull(`a`.`confirm_streak`,0) >= 2) or (ifnull(`a`.`mom_20`,0) > 0))) then 'T1' when (`a`.`state` = 'CONFIRM') then 'T2' when (`a`.`state` = 'HOLD') then 'T2' when (`a`.`state` = 'IGNITE') then 'T3' when (`a`.`state` = 'FADE') then 'T4' else 'T9' end) AS `tier`,(case when ((`a`.`state` = 'CONFIRM') and ((ifnull(`a`.`confirm_streak`,0) >= 2) or (ifnull(`a`.`mom_20`,0) > 0))) then 0 when (`a`.`state` = 'CONFIRM') then 1 when (`a`.`state` = 'HOLD') then 2 when (`a`.`state` = 'IGNITE') then 3 when (`a`.`state` = 'FADE') then 4 else 9 end) AS `tier_pri` from (select `n`.`trade_date` AS `trade_date`,`n`.`trading_date` AS `trading_date`,`n`.`sector_type` AS `sector_type`,`n`.`sector_id` AS `sector_id`,`n`.`sector_name` AS `sector_name`,`n`.`state` AS `state`,`n`.`score` AS `score`,`n`.`members` AS `members`,`n`.`cov_5` AS `cov_5`,`n`.`cov_10` AS `cov_10`,`n`.`cov_20` AS `cov_20`,`n`.`mom_5` AS `mom_5`,`n`.`mom_10` AS `mom_10`,`n`.`mom_20` AS `mom_20`,`n`.`amt_impulse` AS `amt_impulse`,`n`.`up_ratio` AS `up_ratio`,`n`.`up_ma5` AS `up_ma5`,`n`.`up_slope` AS `up_slope`,`n`.`rn_all` AS `rn_all`,`n`.`rn_conf` AS `rn_conf`,`n`.`grp_conf` AS `grp_conf`,(case when (`n`.`state` = 'CONFIRM') then row_number() OVER (PARTITION BY `n`.`sector_type`,`n`.`sector_id`,`n`.`grp_conf` ORDER BY `n`.`trade_date` )  else 0 end) AS `confirm_streak` from (select `m`.`trade_date` AS `trade_date`,`m`.`trading_date` AS `trading_date`,`m`.`sector_type` AS `sector_type`,`m`.`sector_id` AS `sector_id`,`m`.`sector_name` AS `sector_name`,`m`.`state` AS `state`,`m`.`score` AS `score`,`m`.`members` AS `members`,`m`.`cov_5` AS `cov_5`,`m`.`cov_10` AS `cov_10`,`m`.`cov_20` AS `cov_20`,`m`.`mom_5` AS `mom_5`,`m`.`mom_10` AS `mom_10`,`m`.`mom_20` AS `mom_20`,`m`.`amt_impulse` AS `amt_impulse`,`m`.`up_ratio` AS `up_ratio`,`m`.`up_ma5` AS `up_ma5`,`m`.`up_slope` AS `up_slope`,`m`.`rn_all` AS `rn_all`,`m`.`rn_conf` AS `rn_conf`,(case when (`m`.`state` = 'CONFIRM') then (`m`.`rn_all` - `m`.`rn_conf`) else NULL end) AS `grp_conf` from (select `v`.`trade_date` AS `trade_date`,`v`.`trading_date` AS `trading_date`,`v`.`sector_type` AS `sector_type`,`v`.`sector_id` AS `sector_id`,`v`.`sector_name` AS `sector_name`,`v`.`state` AS `state`,`v`.`score` AS `score`,`v`.`members` AS `members`,`v`.`cov_5` AS `cov_5`,`v`.`cov_10` AS `cov_10`,`v`.`cov_20` AS `cov_20`,`v`.`mom_5` AS `mom_5`,`v`.`mom_10` AS `mom_10`,`v`.`mom_20` AS `mom_20`,`v`.`amt_impulse` AS `amt_impulse`,`v`.`up_ratio` AS `up_ratio`,`v`.`up_ma5` AS `up_ma5`,`v`.`up_slope` AS `up_slope`,row_number() OVER (PARTITION BY `v`.`sector_type`,`v`.`sector_id` ORDER BY `v`.`trade_date` )  AS `rn_all`,(case when (`v`.`state` = 'CONFIRM') then row_number() OVER (PARTITION BY `v`.`sector_type`,`v`.`sector_id`,`v`.`state` ORDER BY `v`.`trade_date` )  else NULL end) AS `rn_conf` from `cn_sector_rotation_named_v` `v`) `m`) `n`) `a`) `t`) `r` */;
@@ -2590,7 +2590,7 @@ DELIMITER ;
 /*!50001 SET @saved_col_connection     = @@collation_connection */;
 /*!50001 SET character_set_client      = utf8mb4 */;
 /*!50001 SET character_set_results     = utf8mb4 */;
-/*!50001 SET collation_connection      = utf8mb4_0900_ai_ci */;
+/*!50001 SET collation_connection      = utf8mb4_unicode_ci */;
 /*!50001 CREATE ALGORITHM=UNDEFINED */
 /*!50013 DEFINER=`cn_opr`@`localhost` SQL SECURITY DEFINER */
 /*!50001 VIEW `cn_sector_rotation_state_v` AS select `t`.`sector_type` AS `sector_type`,`t`.`sector_id` AS `sector_id`,`t`.`trade_date` AS `trade_date`,`t`.`members` AS `members`,`t`.`amount_sum` AS `amount_sum`,`t`.`eqw_ret` AS `eqw_ret`,`t`.`up_ratio` AS `up_ratio`,`t`.`mom_5` AS `mom_5`,`t`.`mom_10` AS `mom_10`,`t`.`mom_20` AS `mom_20`,`t`.`amt_impulse` AS `amt_impulse`,`t`.`up_ma5` AS `up_ma5`,`t`.`up_slope` AS `up_slope`,`t`.`cov_5` AS `cov_5`,`t`.`cov_10` AS `cov_10`,`t`.`cov_20` AS `cov_20`,(case when (`t`.`base_state` = 'FADE') then 'FADE' when (`t`.`base_state` = 'CONFIRM') then 'CONFIRM' when ((`t`.`recent_confirm` = 1) and (`t`.`members` >= 30) and (`t`.`cov_10` >= 10) and (`t`.`mom_10` > 0) and (`t`.`up_ma5` >= 0.52) and (`t`.`up_ratio` >= 0.50) and (`t`.`amt_impulse` >= 0.95)) then 'HOLD' when (`t`.`base_state` = 'IGNITE') then 'IGNITE' else 'NEUTRAL' end) AS `state`,(((ifnull(`t`.`mom_10`,0) * 100) + ((ifnull(`t`.`amt_impulse`,1) - 1) * 50)) + ((ifnull(`t`.`up_ratio`,0) - 0.5) * 100)) AS `score` from (select `f`.`sector_type` AS `sector_type`,`f`.`sector_id` AS `sector_id`,`f`.`trade_date` AS `trade_date`,`f`.`members` AS `members`,`f`.`amount_sum` AS `amount_sum`,`f`.`avg_ret` AS `avg_ret`,`f`.`median_ret` AS `median_ret`,`f`.`eqw_ret` AS `eqw_ret`,`f`.`up_ratio` AS `up_ratio`,`f`.`cov_5` AS `cov_5`,`f`.`cov_10` AS `cov_10`,`f`.`cov_20` AS `cov_20`,`f`.`amt_ma20` AS `amt_ma20`,`f`.`amt_impulse` AS `amt_impulse`,`f`.`up_ma5` AS `up_ma5`,`f`.`up_slope` AS `up_slope`,`f`.`mom_5` AS `mom_5`,`f`.`mom_10` AS `mom_10`,`f`.`mom_20` AS `mom_20`,(case when ((`f`.`members` >= 30) and (`f`.`cov_10` >= 10) and (`f`.`amt_impulse` >= 1.20) and (`f`.`up_ratio` <= 0.45) and (`f`.`mom_5` < 0)) then 'FADE' when ((`f`.`members` >= 30) and (`f`.`cov_20` >= 20) and (`f`.`mom_5` > 0) and (`f`.`mom_10` > 0) and (`f`.`amt_impulse` >= 1.30) and (`f`.`up_ratio` >= 0.55) and (`f`.`up_ma5` >= 0.52)) then 'CONFIRM' when ((`f`.`members` >= 30) and (`f`.`cov_10` >= 10) and (`f`.`mom_5` > 0) and (`f`.`amt_impulse` >= 1.30) and (`f`.`up_ratio` >= 0.55)) then 'IGNITE' else 'NEUTRAL' end) AS `base_state`,max((case when ((`f`.`members` >= 30) and (`f`.`cov_20` >= 20) and (`f`.`mom_5` > 0) and (`f`.`mom_10` > 0) and (`f`.`amt_impulse` >= 1.30) and (`f`.`up_ratio` >= 0.55) and (`f`.`up_ma5` >= 0.52)) then 1 else 0 end)) OVER (PARTITION BY `f`.`sector_type`,`f`.`sector_id` ORDER BY `f`.`trade_date` ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING)  AS `recent_confirm` from `cn_sector_eod_feature_v` `f`) `t` */;
@@ -2608,7 +2608,7 @@ DELIMITER ;
 /*!50001 SET @saved_col_connection     = @@collation_connection */;
 /*!50001 SET character_set_client      = utf8mb4 */;
 /*!50001 SET character_set_results     = utf8mb4 */;
-/*!50001 SET collation_connection      = utf8mb4_0900_ai_ci */;
+/*!50001 SET collation_connection      = utf8mb4_unicode_ci */;
 /*!50001 CREATE ALGORITHM=UNDEFINED */
 /*!50013 DEFINER=`cn_opr`@`localhost` SQL SECURITY DEFINER */
 /*!50001 VIEW `cn_stock_active_universe_v` AS select `s`.`symbol` AS `symbol`,`s`.`is_active` AS `is_active`,`s`.`inactive_reason` AS `inactive_reason`,`s`.`first_trade_date` AS `first_trade_date`,`s`.`last_trade_date` AS `last_trade_date`,`s`.`recent_trade_days` AS `recent_trade_days`,`s`.`updated_at` AS `updated_at` from `cn_stock_universe_status_t` `s` where (ifnull(`s`.`is_active`,1) = 1) */;
@@ -2626,7 +2626,7 @@ DELIMITER ;
 /*!50001 SET @saved_col_connection     = @@collation_connection */;
 /*!50001 SET character_set_client      = utf8mb4 */;
 /*!50001 SET character_set_results     = utf8mb4 */;
-/*!50001 SET collation_connection      = utf8mb4_0900_ai_ci */;
+/*!50001 SET collation_connection      = utf8mb4_unicode_ci */;
 /*!50001 CREATE ALGORITHM=UNDEFINED */
 /*!50013 DEFINER=`cn_opr`@`localhost` SQL SECURITY DEFINER */
 /*!50001 VIEW `cn_stock_daily_price_active_v` AS select `p`.`SYMBOL` AS `SYMBOL`,`p`.`TRADE_DATE` AS `TRADE_DATE`,`p`.`OPEN` AS `OPEN`,`p`.`CLOSE` AS `CLOSE`,`p`.`PRE_CLOSE` AS `PRE_CLOSE`,`p`.`HIGH` AS `HIGH`,`p`.`LOW` AS `LOW`,`p`.`VOLUME` AS `VOLUME`,`p`.`AMOUNT` AS `AMOUNT`,`p`.`AMPLITUDE` AS `AMPLITUDE`,`p`.`CHG_PCT` AS `CHG_PCT`,`p`.`CHANGE` AS `CHANGE`,`p`.`TURNOVER_RATE` AS `TURNOVER_RATE`,`p`.`SOURCE` AS `SOURCE`,`p`.`WINDOW_START` AS `WINDOW_START`,`p`.`CREATED_AT` AS `CREATED_AT`,`p`.`EXCHANGE` AS `EXCHANGE`,`p`.`NAME` AS `NAME` from (`cn_stock_daily_price` `p` join `cn_stock_universe_status_t` `s` on((`s`.`symbol` = `p`.`SYMBOL`))) where (ifnull(`s`.`is_active`,1) = 1) */;
@@ -2644,7 +2644,7 @@ DELIMITER ;
 /*!50001 SET @saved_col_connection     = @@collation_connection */;
 /*!50001 SET character_set_client      = utf8mb4 */;
 /*!50001 SET character_set_results     = utf8mb4 */;
-/*!50001 SET collation_connection      = utf8mb4_0900_ai_ci */;
+/*!50001 SET collation_connection      = utf8mb4_unicode_ci */;
 /*!50001 CREATE ALGORITHM=UNDEFINED */
 /*!50013 DEFINER=`cn_opr`@`localhost` SQL SECURITY DEFINER */
 /*!50001 VIEW `v_rotation_entry_exec_v1` AS with `cal` as (select distinct `b`.`RUN_ID` AS `p_run_id`,`b`.`TRADE_DATE` AS `trade_date` from `cn_sector_rot_bt_daily_t` `b`), `next_td` as (select `c1`.`p_run_id` AS `p_run_id`,`c1`.`trade_date` AS `signal_date`,min(`c2`.`trade_date`) AS `exec_date` from (`cal` `c1` join `cal` `c2` on(((`c2`.`p_run_id` = `c1`.`p_run_id`) and (`c2`.`trade_date` > `c1`.`trade_date`)))) group by `c1`.`p_run_id`,`c1`.`trade_date`), `enter_sig` as (select `s`.`SIGNAL_DATE` AS `signal_date`,`s`.`SECTOR_TYPE` AS `sector_type`,`s`.`SECTOR_ID` AS `sector_id`,`s`.`SECTOR_NAME` AS `sector_name`,`s`.`ENTRY_RANK` AS `entry_rank`,`s`.`ENTRY_CNT` AS `entry_cnt`,`s`.`WEIGHT_SUGGESTED` AS `weight_suggested`,`s`.`SCORE` AS `signal_score`,`s`.`STATE` AS `state`,`s`.`TRANSITION` AS `transition` from `cn_sector_rotation_signal_t` `s` where (upper(`s`.`ACTION`) = 'ENTER')), `energy` as (select `e`.`TRADE_DATE` AS `signal_date`,`e`.`SECTOR_TYPE` AS `sector_type`,`e`.`SECTOR_ID` AS `sector_id`,`e`.`ENERGY_SCORE` AS `energy_score`,`e`.`ENERGY_PCT` AS `energy_pct` from `cn_sector_energy_snap_t` `e`) select `nt`.`p_run_id` AS `p_run_id`,`es`.`signal_date` AS `signal_date`,`nt`.`exec_date` AS `exec_enter_date`,`es`.`sector_type` AS `sector_type`,`es`.`sector_id` AS `sector_id`,`es`.`sector_name` AS `sector_name`,`es`.`entry_rank` AS `entry_rank`,`es`.`entry_cnt` AS `entry_cnt`,`es`.`weight_suggested` AS `weight_suggested`,`es`.`signal_score` AS `signal_score`,`en`.`energy_score` AS `energy_score`,`en`.`energy_pct` AS `energy_pct`,(case when (`en`.`energy_pct` is null) then 'NA' when (`en`.`energy_pct` >= 0.80) then 'HIGH' when (`en`.`energy_pct` >= 0.60) then 'MID' else 'LOW' end) AS `energy_tier`,`es`.`state` AS `state`,`es`.`transition` AS `transition` from ((`enter_sig` `es` join `next_td` `nt` on((`nt`.`signal_date` = `es`.`signal_date`))) left join `energy` `en` on(((`en`.`signal_date` = `es`.`signal_date`) and (`en`.`sector_type` = `es`.`sector_type`) and (`en`.`sector_id` = `es`.`sector_id`)))) */;
@@ -2662,7 +2662,7 @@ DELIMITER ;
 /*!50001 SET @saved_col_connection     = @@collation_connection */;
 /*!50001 SET character_set_client      = utf8mb4 */;
 /*!50001 SET character_set_results     = utf8mb4 */;
-/*!50001 SET collation_connection      = utf8mb4_0900_ai_ci */;
+/*!50001 SET collation_connection      = utf8mb4_unicode_ci */;
 /*!50001 CREATE ALGORITHM=UNDEFINED */
 /*!50013 DEFINER=`cn_opr`@`localhost` SQL SECURITY DEFINER */
 /*!50001 VIEW `v_rotation_exit_exec_v1` AS with `params` as (select `p`.`RUN_ID` AS `p_run_id`,`p`.`TRADE_DATE` AS `signal_date` from `cn_sector_rot_pos_daily_t` `p` group by `p`.`RUN_ID`,`p`.`TRADE_DATE`), `cal` as (select distinct `b`.`RUN_ID` AS `p_run_id`,`b`.`TRADE_DATE` AS `trade_date` from `cn_sector_rot_bt_daily_t` `b`), `next_td` as (select `c1`.`p_run_id` AS `p_run_id`,`c1`.`trade_date` AS `signal_date`,min(`c2`.`trade_date`) AS `exec_date` from (`cal` `c1` join `cal` `c2` on(((`c2`.`p_run_id` = `c1`.`p_run_id`) and (`c2`.`trade_date` > `c1`.`trade_date`)))) group by `c1`.`p_run_id`,`c1`.`trade_date`), `holding` as (select distinct `p`.`RUN_ID` AS `p_run_id`,`p`.`TRADE_DATE` AS `signal_date`,`p`.`SECTOR_TYPE` AS `sector_type`,`p`.`SECTOR_ID` AS `sector_id` from `cn_sector_rot_pos_daily_t` `p` where (`p`.`EXIT_FLAG` = 0)), `exit_events` as (select `pr`.`p_run_id` AS `p_run_id`,`pr`.`signal_date` AS `signal_date`,`nt`.`exec_date` AS `exec_exit_date`,`s`.`SECTOR_TYPE` AS `sector_type`,`s`.`SECTOR_ID` AS `sector_id`,`s`.`SECTOR_NAME` AS `sector_name`,`s`.`STATE` AS `state`,`s`.`TRANSITION` AS `transition`,`s`.`ENTRY_RANK` AS `entry_rank`,`s`.`SCORE` AS `signal_score` from (((`params` `pr` join `holding` `h` on(((`h`.`p_run_id` = `pr`.`p_run_id`) and (`h`.`signal_date` = `pr`.`signal_date`)))) join `cn_sector_rotation_signal_t` `s` on(((`s`.`SIGNAL_DATE` = `pr`.`signal_date`) and (`s`.`SECTOR_TYPE` = `h`.`sector_type`) and (`s`.`SECTOR_ID` = `h`.`sector_id`) and (upper(`s`.`ACTION`) = 'EXIT')))) join `next_td` `nt` on(((`nt`.`p_run_id` = `pr`.`p_run_id`) and (`nt`.`signal_date` = `pr`.`signal_date`))))), `last_enter` as (select `x`.`p_run_id` AS `p_run_id`,`x`.`signal_date` AS `exit_signal_date`,`x`.`sector_type` AS `sector_type`,`x`.`sector_id` AS `sector_id`,max(`s2`.`SIGNAL_DATE`) AS `enter_signal_date` from (`exit_events` `x` left join `cn_sector_rotation_signal_t` `s2` on(((`s2`.`SECTOR_TYPE` = `x`.`sector_type`) and (`s2`.`SECTOR_ID` = `x`.`sector_id`) and (upper(`s2`.`ACTION`) = 'ENTER') and (`s2`.`SIGNAL_DATE` < `x`.`signal_date`)))) group by `x`.`p_run_id`,`x`.`signal_date`,`x`.`sector_type`,`x`.`sector_id`), `enter_exec` as (select `le`.`p_run_id` AS `p_run_id`,`le`.`exit_signal_date` AS `exit_signal_date`,`le`.`sector_type` AS `sector_type`,`le`.`sector_id` AS `sector_id`,`le`.`enter_signal_date` AS `enter_signal_date`,`nt`.`exec_date` AS `exec_enter_date` from (`last_enter` `le` left join `next_td` `nt` on(((`nt`.`p_run_id` = `le`.`p_run_id`) and (`nt`.`signal_date` = `le`.`enter_signal_date`))))), `min_exit_exec` as (select `e`.`p_run_id` AS `p_run_id`,`e`.`exit_signal_date` AS `exit_signal_date`,`e`.`sector_type` AS `sector_type`,`e`.`sector_id` AS `sector_id`,(select `t`.`trade_date` from (select `c`.`trade_date` AS `trade_date`,row_number() OVER (ORDER BY `c`.`trade_date` )  AS `rn` from `cal` `c` where ((`c`.`p_run_id` = `e`.`p_run_id`) and (`c`.`trade_date` >= `e`.`exec_enter_date`))) `t` where (`t`.`rn` = 3)) AS `min_exit_exec_date` from `enter_exec` `e`) select `x`.`p_run_id` AS `p_run_id`,`x`.`signal_date` AS `signal_date`,`x`.`exec_exit_date` AS `exec_exit_date`,`x`.`sector_type` AS `sector_type`,`x`.`sector_id` AS `sector_id`,`x`.`sector_name` AS `sector_name`,`x`.`state` AS `state`,`x`.`transition` AS `transition`,`x`.`entry_rank` AS `entry_rank`,`x`.`signal_score` AS `signal_score`,`e`.`enter_signal_date` AS `enter_signal_date`,`e`.`exec_enter_date` AS `exec_enter_date`,(case when (`e`.`exec_enter_date` is null) then 'EXIT_NO_PRIOR_ENTER' when (`x`.`exec_exit_date` >= `m`.`min_exit_exec_date`) then 'EXIT_ALLOWED' else 'EXIT_PENDING' end) AS `exit_exec_status` from ((`exit_events` `x` left join `enter_exec` `e` on(((`e`.`p_run_id` = `x`.`p_run_id`) and (`e`.`exit_signal_date` = `x`.`signal_date`) and (`e`.`sector_type` = `x`.`sector_type`) and (`e`.`sector_id` = `x`.`sector_id`)))) left join `min_exit_exec` `m` on(((`m`.`p_run_id` = `x`.`p_run_id`) and (`m`.`exit_signal_date` = `x`.`signal_date`) and (`m`.`sector_type` = `x`.`sector_type`) and (`m`.`sector_id` = `x`.`sector_id`)))) */;

@@ -1,33 +1,71 @@
 @echo off
-setlocal
+setlocal EnableExtensions DisableDelayedExpansion
 
-set "PYTHON_EXE=C:\Apps\Python\Python312\python.exe"
-set "RUNNER_PY=D:\LHJ\PythonWS\MarketScraper\AsharesScraperV2\runner.py"
-set "WORKDIR=D:\LHJ\PythonWS\MarketScraper\AsharesScraperV2"
+set "SCRIPT_DIR=%~dp0"
+pushd "%SCRIPT_DIR%" >nul
 
-cd /d "%WORKDIR%"
+set "PYTHON_EXE=python"
+if exist "%LOCALAPPDATA%\Python\pythoncore-3.14-64\python.exe" (
+    set "PYTHON_EXE=%LOCALAPPDATA%\Python\pythoncore-3.14-64\python.exe"
+)
 
-echo [DAILY] 1/4 stock + rotation
-"%PYTHON_EXE%" "%RUNNER_PY%" --flag tu --tasks stock,rotation --asof latest
-if errorlevel 1 goto :fail
+set "RUNNER_PY=%SCRIPT_DIR%runner.py"
+if not exist "%RUNNER_PY%" (
+    echo [DAILY] ERROR: runner.py not found at "%RUNNER_PY%"
+    popd >nul
+    exit /b 1
+)
 
-echo [DAILY] 2/4 stock_basic (PE_TTM/PB/PS daily valuation)
-"%PYTHON_EXE%" "%RUNNER_PY%" --flag tu --tasks stock_basic --asof latest
-if errorlevel 1 goto :fail
+if "%~1"=="" (
+    echo Usage: daily.bat YEAR [--refresh] [--replace]
+    popd >nul
+    exit /b 2
+)
 
-echo [DAILY] 3/4 sw_industry (industry_return / industry_strength)
-"%PYTHON_EXE%" "%RUNNER_PY%" --flag tu --tasks sw_industry --asof latest
-if errorlevel 1 goto :fail
+set "YEAR=%~1"
+shift /1
+set "EXTRA_ARGS="
 
-echo [DAILY] 4/4 index + event
-"%PYTHON_EXE%" "%RUNNER_PY%" --flag tu --tasks index --asof latest
-if errorlevel 1 goto :fail
-"%PYTHON_EXE%" "%RUNNER_PY%" --flag tu --tasks event --asof latest --days 1
-if errorlevel 1 goto :fail
+:parse_args
+if "%~1"=="" goto args_done
+if /I "%~1"=="--refresh" (
+    set "EXTRA_ARGS=%EXTRA_ARGS% --refresh"
+) else if /I "%~1"=="--replace" (
+    echo [DAILY] NOTICE: --replace requested, but runner.py does not support --replace. Using --refresh.
+    set "EXTRA_ARGS=%EXTRA_ARGS% --refresh"
+) else (
+    echo [DAILY] WARNING: ignoring unsupported argument: %~1
+)
+shift /1
+goto parse_args
 
-echo [DAILY] done
+:args_done
+
+set "START_DATE=%YEAR%-01-01"
+set "END_DATE=%YEAR%-12-31"
+
+rem set "START_DATE=2025-09-01"
+rem set "END_DATE=2025-12-31"
+
+if "%V8_DAILY_TASKS%"=="" (
+    set "V8_DAILY_TASKS=v8_daily_market_raw,v8_daily_reference,v8_daily_audit,v8_daily_derived_foundation,v8_daily_derived_mainline,v8_daily_derived_alpha"
+	rem set "V8_DAILY_TASKS=v8_daily_derived_foundation,v8_daily_derived_mainline,v8_daily_derived_alpha"
+)
+
+echo ============================================================
+echo [DAILY] Year %YEAR% : %START_DATE% to %END_DATE%
+echo [DAILY] tasks=%V8_DAILY_TASKS%
+echo ============================================================
+
+"%PYTHON_EXE%" "%RUNNER_PY%" --tasks "%V8_DAILY_TASKS%" --start-date "%START_DATE%" --end-date "%END_DATE%" %EXTRA_ARGS%
+
+set "EXIT_CODE=%ERRORLEVEL%"
+if not "%EXIT_CODE%"=="0" (
+    echo [DAILY] failed with exit code %EXIT_CODE%
+    popd >nul
+    exit /b %EXIT_CODE%
+)
+
+echo [DAILY] completed year %YEAR%
+popd >nul
 exit /b 0
-
-:fail
-echo [DAILY] failed with exit code %ERRORLEVEL%
-exit /b %ERRORLEVEL%

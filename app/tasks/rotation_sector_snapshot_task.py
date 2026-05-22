@@ -85,6 +85,47 @@ def _map_proc_exists(conn) -> bool:
     ).scalar()
     return int(n or 0) > 0
 
+def _latest_price_trade_date_on_or_before(conn, requested_trade_date: _dt.date) -> _dt.date | None:
+    """Return latest cn_stock_daily_price trade_date <= requested date."""
+    max_dt = conn.execute(
+        text(
+            """
+            SELECT MAX(trade_date)
+            FROM cn_stock_daily_price
+            WHERE trade_date <= :req_dt
+            """
+        ),
+        {"req_dt": requested_trade_date},
+    ).scalar()
+    if max_dt is None:
+        return None
+    return _ensure_date(max_dt)
+
+
+def _find_missing_board_member_map_dates(conn, end_date: _dt.date):
+    """Trade dates with stock price but no board-member map row."""
+    rows = conn.execute(
+        text(
+            """
+            SELECT p.trade_date
+            FROM (
+                SELECT DISTINCT trade_date
+                FROM cn_stock_daily_price
+                WHERE trade_date <= :end_date
+            ) p
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM cn_board_member_map_d m
+                WHERE m.trade_date = p.trade_date
+                LIMIT 1
+            )
+            ORDER BY p.trade_date
+            """
+        ),
+        {"end_date": end_date},
+    ).fetchall()
+    return [_ensure_date(r[0]) for r in rows]
+
 
 def _is_missing_transition_view_error(exc: Exception) -> bool:
     # MySQL 1146: table/view does not exist.
@@ -161,9 +202,15 @@ class SectorRotationSnapshotTask:
             "CALL sp_build_board_member_map(:p_trade_date, :p_trade_date)",
         ).strip()
         energy_sql = os.getenv("ROTATION_ENERGY_SQL", "").strip()
+        refresh_mode = str(os.getenv("ROTATION_REFRESH_MODE", "v8_core")).strip().lower()
+        if refresh_mode not in {"v8_core", "base_chain", "sp"}:
+            raise RuntimeError(
+                "[rotation_snapshot] invalid ROTATION_REFRESH_MODE=%r. Expected 'v8_core', 'base_chain' or 'sp'."
+                % refresh_mode
+            )
 
         ctx.log.info(
-            f"[rotation_snapshot] calling mysql SP; start={start} end={end} "
+            f"[rotation_snapshot] refresh start; mode={refresh_mode} start={start} end={end} "
             f"run_id={run_id} binds={sorted(payload.keys())}"
         )
 
@@ -171,15 +218,41 @@ class SectorRotationSnapshotTask:
             # Execute with transaction
             with self.engine.begin() as conn:
                 req_dt = _ensure_date(payload["p_trade_date"])
+
+                # Historical yearly wrappers often pass calendar year-end dates such as
+                # 2011-12-31. If that date is not a trading day, use the latest price
+                # trade date on or before it (e.g. 2011-12-30) instead of failing as a
+                # false stale-data error.
+                price_trade_dt = _latest_price_trade_date_on_or_before(conn, req_dt)
+                if price_trade_dt is not None and price_trade_dt < req_dt:
+                    ctx.log.info(
+                        "[rotation_snapshot] requested trade_date=%s is not an available price trade date; "
+                        "using latest price trade_date=%s",
+                        req_dt,
+                        price_trade_dt,
+                    )
+                    payload["p_trade_date"] = price_trade_dt
+                    payload["trade_date"] = price_trade_dt
+                    req_dt = price_trade_dt
+
+                # Ensure cn_board_member_map_d is available up to the effective target
+                # date before computing latest valid rotation date. Without this,
+                # rotation can get stuck at the old map max date even when price data is
+                # already refreshed to newer years.
+                auto_map_backfill = str(os.getenv("ROTATION_AUTO_BACKFILL_BOARD_MEMBER_MAP", "1")).strip().lower()
+                if auto_map_backfill not in {"0", "false", "no", "off"}:
+                    self._backfill_missing_board_member_map(conn=conn, end_date=req_dt)
+
                 eff_dt = _resolve_trade_date_for_rotation(conn, req_dt)
                 if eff_dt != req_dt:
-                    ctx.log.warning(
-                        "[rotation_snapshot] requested trade_date=%s exceeds latest price date; fallback to %s",
-                        req_dt,
-                        eff_dt,
+                    msg = (
+                        "[rotation_snapshot] requested trade_date exceeds latest valid rotation date "
+                        f"(requested={req_dt}, effective={eff_dt}). cn_board_member_map_d may still be incomplete."
                     )
-                    payload["p_trade_date"] = eff_dt
-                    payload["trade_date"] = eff_dt
+                    if str(os.getenv("ROTATION_FAIL_IF_STALE", "1")).strip().lower() in {"0", "false", "no", "off"}:
+                        ctx.log.warning(msg + " Skip by ROTATION_FAIL_IF_STALE=0.")
+                        return
+                    raise RuntimeError(msg + " Refuse silent fallback.")
 
                 self._refresh_active_universe_before_daily(conn=conn, payload=payload)
 
@@ -190,7 +263,7 @@ class SectorRotationSnapshotTask:
                 # Daily map incremental step (by trade_date) to ensure latest symbol->sector mapping is present.
                 if map_sql:
                     if "sp_build_board_member_map" in map_sql.lower() and not _map_proc_exists(conn):
-                        ctx.log.warning("[rotation_snapshot] map SP missing; skip map pre-step.")
+                        raise RuntimeError("[rotation_snapshot] map SP missing: sp_build_board_member_map. Refuse skip.")
                     else:
                         ctx.log.info("[rotation_snapshot] pre-step map refresh enabled; executing ROTATION_MAP_SQL")
                         try:
@@ -215,22 +288,42 @@ class SectorRotationSnapshotTask:
                         )
                         raise
 
-                try:
-                    conn.execute(text(sp_sql), payload)
-                except Exception as e:
-                    if _is_missing_transition_view_error(e):
-                        ctx.log.warning(
-                            "[rotation_snapshot] transition view missing; fallback to daily base-table chain for %s",
-                            payload.get("p_trade_date"),
-                        )
-                        self._run_daily_refresh_base_chain(conn=conn, payload=payload)
-                    else:
+                if refresh_mode == "v8_core":
+                    # V8 production/backfill core-only mode:
+                    # keep only the required board-member map and optional active-universe refresh.
+                    # Do not run legacy V7 sector-rotation ranked/signal/BT/snapshot chains.
+                    ctx.log.info(
+                        "[rotation_snapshot] v8_core done; trade_date=%s run_id=%s; "
+                        "skip legacy sector rotation chain",
+                        payload.get("p_trade_date"),
+                        run_id,
+                    )
+                    return
+
+                if refresh_mode == "base_chain":
+                    # Legacy/research sector rotation chain. Disabled by default because it writes
+                    # cn_sector_eod_hist_t, cn_sector_rotation_ranked_t, cn_sector_rotation_signal_t,
+                    # cn_sector_rot_bt_daily_t and rotation snapshot tables.
+                    self._run_daily_refresh_base_chain(conn=conn, payload=payload, include_downstream=True)
+                else:
+                    try:
+                        conn.execute(text(sp_sql), payload)
+                    except Exception as e:
+                        if _is_missing_transition_view_error(e):
+                            raise RuntimeError(
+                                "[rotation_snapshot] ROTATION_REFRESH_MODE=sp requires cn_sector_rotation_transition_v, "
+                                "but the view is missing. Use ROTATION_REFRESH_MODE=base_chain or deploy the SP/view DDL."
+                            ) from e
                         ctx.log.exception(
                             "[rotation_snapshot] ROTATION_SNAPSHOT_SQL failed; sql=%s payload=%s",
                             sp_sql,
                             payload,
                         )
                         raise
+
+                    auto_repair_downstream = int(os.getenv("ROTATION_AUTO_REPAIR_DOWNSTREAM", "1"))
+                    if auto_repair_downstream == 1:
+                        self._repair_missing_rotation_downstream(conn=conn, payload=payload)
         except Exception:
             ctx.log.exception(
                 "[rotation_snapshot] run failed; start=%s end=%s run_id=%s trade_date=%s",
@@ -243,6 +336,76 @@ class SectorRotationSnapshotTask:
 
         ctx.log.info("[rotation_snapshot] done")
 
+    def audit_coverage(self, ctx, run_id: str | None = None, end_date=None) -> dict[str, list[_dt.date]]:
+        engine = getattr(ctx, "engine", None)
+        if engine is None:
+            raise RuntimeError("[rotation_snapshot] audit requires MySQL engine.")
+        cfg = ctx.config
+        cfg.finalize_dates()
+        resolved_run_id = (
+            run_id
+            or os.getenv("ROTATION_SNAPSHOT_RUN_ID")
+            or getattr(ctx.config, "rotation_run_id", None)
+            or getattr(ctx.config, "run_id", None)
+            or "SR_BASE_V535_EP90_XP55_XC2_MH5_RF5_K2_COST5BPS"
+        )
+        requested_end = _ensure_date(end_date or cfg.end_date)
+        with engine.begin() as conn:
+            effective_end = _resolve_trade_date_for_rotation(conn, requested_end)
+            upstream_missing = self._find_missing_rotation_dates(conn=conn, end_date=effective_end)
+            bt_missing = self._find_missing_rotation_bt_dates(conn=conn, run_id=resolved_run_id, end_date=effective_end)
+            snap_missing = self._find_missing_rotation_snap_dates(conn=conn, run_id=resolved_run_id, end_date=effective_end)
+        return {
+            "effective_end_date": [effective_end],
+            "upstream_missing": upstream_missing,
+            "bt_missing": bt_missing,
+            "snap_missing": snap_missing,
+        }
+
+    def _backfill_missing_board_member_map(self, conn, end_date: _dt.date) -> None:
+        """Backfill cn_board_member_map_d for missing price trade dates up to end_date."""
+        if not _map_proc_exists(conn):
+            raise RuntimeError("[rotation_snapshot] map SP missing: sp_build_board_member_map. Refuse skip.")
+
+        missing_days = _find_missing_board_member_map_dates(conn=conn, end_date=end_date)
+        if not missing_days:
+            self.log.info("[rotation_snapshot] board-member map backfill check: no missing map days up to %s", end_date)
+            return
+
+        self.log.info(
+            "[rotation_snapshot] board-member map auto backfill enabled: missing_days=%s range=%s..%s",
+            len(missing_days),
+            missing_days[0],
+            missing_days[-1],
+        )
+
+        progress_every = max(1, int(os.getenv("ROTATION_BOARD_MAP_PROGRESS_EVERY", "50")))
+        for i, d in enumerate(missing_days, start=1):
+            conn.execute(
+                text("CALL sp_build_board_member_map(:d1, :d2)"),
+                {"d1": d, "d2": d},
+            )
+            if i % progress_every == 0 or i == len(missing_days):
+                self.log.info(
+                    "[rotation_snapshot] board-member map backfill progress: %s/%s latest=%s",
+                    i,
+                    len(missing_days),
+                    d,
+                )
+
+        remaining_days = _find_missing_board_member_map_dates(conn=conn, end_date=end_date)
+        if remaining_days:
+            raise RuntimeError(
+                "[rotation_snapshot] board-member map auto backfill incomplete "
+                f"(remaining_days={len(remaining_days)} first={remaining_days[0]} last={remaining_days[-1]})."
+            )
+
+        self.log.info(
+            "[rotation_snapshot] board-member map auto backfill complete: filled_days=%s end=%s",
+            len(missing_days),
+            end_date,
+        )
+
     def _refresh_active_universe_before_daily(self, conn, payload) -> None:
         enabled = str(os.getenv("ROTATION_AUTO_REFRESH_ACTIVE_UNIVERSE", "1")).strip().lower()
         if enabled in {"0", "false", "no", "off"}:
@@ -250,8 +413,7 @@ class SectorRotationSnapshotTask:
             return
 
         if not _active_universe_refresh_proc_exists(conn):
-            self.log.warning("[rotation_snapshot] sp_refresh_stock_universe_status missing; skip")
-            return
+            raise RuntimeError("[rotation_snapshot] required procedure missing: sp_refresh_stock_universe_status. Refuse skip.")
 
         recent_days = int(os.getenv("ROTATION_ACTIVE_RECENT_DAYS", "30"))
         min_trade_days = int(os.getenv("ROTATION_ACTIVE_MIN_TRADE_DAYS", "1"))
@@ -613,7 +775,7 @@ class SectorRotationSnapshotTask:
                 {"run_id": run_id, "d": trade_date, "force": force},
             )
         self.log.info(
-            "[rotation_snapshot] fallback base-chain done; trade_date=%s run_id=%s force=%s include_downstream=%s",
+            "[rotation_snapshot] base-chain done; trade_date=%s run_id=%s force=%s include_downstream=%s",
             trade_date,
             run_id,
             force,
@@ -668,7 +830,7 @@ class SectorRotationSnapshotTask:
             self.log.info("[rotation_snapshot] auto backfill check: no missing historical board days up to %s", end_date)
             return
 
-        self.log.warning(
+        self.log.info(
             "[rotation_snapshot] auto backfill enabled: missing_days=%s range=%s..%s",
             len(missing_days),
             missing_days[0],
@@ -688,6 +850,173 @@ class SectorRotationSnapshotTask:
                     len(missing_days),
                     d,
                 )
+
+    def _find_missing_rotation_bt_dates(self, conn, run_id: str, end_date: _dt.date):
+        sql = text(
+            """
+            SELECT p.trade_date
+            FROM (
+                SELECT DISTINCT trade_date
+                FROM cn_stock_daily_price
+                WHERE trade_date <= :d
+            ) p
+            WHERE EXISTS (
+                SELECT 1
+                FROM cn_board_member_map_d m
+                WHERE m.trade_date = p.trade_date
+                LIMIT 1
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM cn_sector_rot_bt_daily_t b
+                WHERE b.run_id = (CAST(:run_id AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci)
+                  AND b.trade_date = p.trade_date
+                LIMIT 1
+            )
+            ORDER BY p.trade_date
+            """
+        )
+        rows = conn.execute(sql, {"d": end_date, "run_id": run_id}).fetchall()
+        return [_ensure_date(r[0]) for r in rows]
+
+    def _find_missing_rotation_snap_dates(self, conn, run_id: str, end_date: _dt.date):
+        sql = text(
+            """
+            SELECT b.trade_date
+            FROM cn_sector_rot_bt_daily_t b
+            WHERE b.run_id = (CAST(:run_id AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci)
+              AND b.trade_date <= :d
+              AND (
+                    IFNULL(b.exposed_flag, 0) > 0
+                    OR EXISTS (
+                        SELECT 1
+                        FROM cn_sector_rotation_signal_t s
+                        WHERE s.signal_date = b.trade_date
+                        LIMIT 1
+                    )
+                  )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM cn_rotation_entry_snap_t e
+                    WHERE e.run_id = b.run_id
+                      AND e.trade_date = b.trade_date
+                    LIMIT 1
+                  )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM cn_rotation_holding_snap_t h
+                    WHERE h.run_id = b.run_id
+                      AND h.trade_date = b.trade_date
+                    LIMIT 1
+                  )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM cn_rotation_exit_snap_t x
+                    WHERE x.run_id = b.run_id
+                      AND x.trade_date = b.trade_date
+                    LIMIT 1
+                  )
+            ORDER BY b.trade_date
+            """
+        )
+        rows = conn.execute(sql, {"d": end_date, "run_id": run_id}).fetchall()
+        return [_ensure_date(r[0]) for r in rows]
+
+    def _load_rotation_bt_dates(self, conn, run_id: str, start_date: _dt.date, end_date: _dt.date):
+        rows = conn.execute(
+            text(
+                """
+                SELECT trade_date
+                FROM cn_sector_rot_bt_daily_t
+                WHERE run_id = (CAST(:run_id AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci)
+                  AND trade_date BETWEEN :start_date AND :end_date
+                ORDER BY trade_date
+                """
+            ),
+            {"run_id": run_id, "start_date": start_date, "end_date": end_date},
+        ).fetchall()
+        return [_ensure_date(r[0]) for r in rows]
+
+    def _repair_missing_rotation_downstream(self, conn, payload) -> None:
+        end_date = _ensure_date(payload["p_trade_date"])
+        run_id = str(payload.get("p_run_id") or payload.get("run_id") or "").strip()
+        if not run_id:
+            raise RuntimeError("[rotation_snapshot] run_id is empty. Refuse skip downstream repair.")
+
+        bt_missing = self._find_missing_rotation_bt_dates(conn=conn, run_id=run_id, end_date=end_date)
+        snap_missing = self._find_missing_rotation_snap_dates(conn=conn, run_id=run_id, end_date=end_date)
+        if not bt_missing and not snap_missing:
+            self.log.info("[rotation_snapshot] downstream repair check: no BT/snap gaps up to %s for run_id=%s", end_date, run_id)
+            return
+
+        rebuild_start = min(bt_missing + snap_missing)
+        self.log.info(
+            "[rotation_snapshot] downstream repair enabled: bt_missing=%s snap_missing=%s rebuild_start=%s end=%s run_id=%s",
+            len(bt_missing),
+            len(snap_missing),
+            rebuild_start,
+            end_date,
+            run_id,
+        )
+
+        if bt_missing:
+            conn.execute(
+                text(
+                    """
+                    DELETE FROM cn_sector_rot_bt_daily_t
+                    WHERE run_id = (CAST(:run_id AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci)
+                      AND trade_date BETWEEN :start_date AND :end_date
+                    """
+                ),
+                {"run_id": run_id, "start_date": rebuild_start, "end_date": end_date},
+            )
+            conn.execute(
+                text("CALL SP_BACKFILL_ROT_BT_FROM_PRICE(:run_id, :d, :force)"),
+                {"run_id": run_id, "d": end_date, "force": 1},
+            )
+            conn.execute(
+                text("CALL SP_REPAIR_ROT_BT_NAV(:run_id, :nav_base)"),
+                {"run_id": run_id, "nav_base": 1.0},
+            )
+
+        bt_dates = self._load_rotation_bt_dates(conn=conn, run_id=run_id, start_date=rebuild_start, end_date=end_date)
+        if not bt_dates:
+            raise RuntimeError(
+                "[rotation_snapshot] downstream repair cannot rebuild snapshots because no BT dates exist "
+                f"in {rebuild_start}..{end_date} for run_id={run_id}. Refuse skip."
+            )
+
+        progress_every = max(1, int(os.getenv("ROTATION_DOWNSTREAM_PROGRESS_EVERY", "20")))
+        for i, d in enumerate(bt_dates, start=1):
+            conn.execute(
+                text("CALL SP_REFRESH_ROTATION_SNAP_ALL(:run_id, :d, :force)"),
+                {"run_id": run_id, "d": d, "force": 1},
+            )
+            if i % progress_every == 0 or i == len(bt_dates):
+                self.log.info(
+                    "[rotation_snapshot] downstream repair progress: %s/%s (latest=%s run_id=%s)",
+                    i,
+                    len(bt_dates),
+                    d,
+                    run_id,
+                )
+
+        remaining_bt = self._find_missing_rotation_bt_dates(conn=conn, run_id=run_id, end_date=end_date)
+        remaining_snap = self._find_missing_rotation_snap_dates(conn=conn, run_id=run_id, end_date=end_date)
+        if remaining_bt or remaining_snap:
+            raise RuntimeError(
+                "[rotation_snapshot] downstream repair incomplete "
+                f"(remaining_bt={len(remaining_bt)} remaining_snap={len(remaining_snap)} "
+                f"run_id={run_id} end_date={end_date})"
+            )
+
+        self.log.info(
+            "[rotation_snapshot] downstream repair complete: rebuilt_dates=%s run_id=%s range=%s..%s",
+            len(bt_dates),
+            run_id,
+            rebuild_start,
+            end_date,
+        )
 
     def _build_bind_payload(self, ctx, run_id, trade_date):
         force = getattr(ctx.config, "rotation_force", None)

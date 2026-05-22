@@ -189,22 +189,6 @@ def load_mainline_lifecycle(engine: Engine, start: date, end: date) -> pd.DataFr
     return fetch_df(engine, sql, {"start": start, "end": end})
 
 
-def load_board_member_map(engine: Engine, start: date, end: date) -> pd.DataFrame:
-    """Load cn_board_member_map_d for stock-to-industry membership."""
-    sql = """
-    SELECT
-        trade_date,
-        sector_type,
-        sector_id,
-        symbol
-    FROM cn_board_member_map_d
-    WHERE trade_date BETWEEN :start AND :end
-      AND sector_type = 'INDUSTRY'
-    ORDER BY trade_date, sector_id, symbol
-    """
-    return fetch_df(engine, sql, {"start": start, "end": end})
-
-
 def load_industry_map_hist(engine: Engine) -> pd.DataFrame:
     """Load cn_local_industry_map_hist for industry name mapping."""
     sql = """
@@ -567,7 +551,6 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
             ind_name_lookup[row["industry_id"]] = row.get("industry_name", "")
     print(f"[{_ts()}]   -> {len(ind_name_lookup):,} industries")
 
-    all_results: list[pd.DataFrame] = []
     total_written = 0
 
     for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks, 1):
@@ -623,19 +606,19 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
             total_written += rows_out
             print(f"  [{_ts()}] [dry-run] would write {rows_out:,} rows")
 
-        all_results.append(chunk_df)
+        # Free chunk memory before next iteration
+        del chunk_df
 
         chunk_elapsed = (datetime.now() - t0).seconds
         remaining_est = (n_chunks - chunk_idx) * chunk_elapsed
         print(f"  [{_ts()}] Chunk done in {chunk_elapsed}s  ~{remaining_est // 60}m remaining")
 
-    if not all_results:
+    if total_written == 0:
         return pd.DataFrame()
 
-    result_df = pd.concat(all_results, ignore_index=True)
     print()
-    print(f"[{_ts()}] All chunks complete. Total rows: {len(result_df):,}  written: {total_written:,}")
-    return result_df
+    print(f"[{_ts()}] All chunks complete. Total rows written: {total_written:,}")
+    return pd.DataFrame()
 
 
 # ---------------------------------------------------------------------------

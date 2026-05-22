@@ -34,14 +34,48 @@ from app.tasks.stock_working_capital_alert_task import StockWorkingCapitalAlertT
 from app.tasks.inst_fund_hold_summary_task import InstFundHoldSummaryTask
 from app.tasks.event_loader_task import EventLoaderTask
 from app.tasks.sw_industry_daily_task import SwIndustryDailyTask
+from app.tasks.v8_dataset_ops_task import (
+    V8BoardRefreshTask,
+    V8DailyAuditTask,
+    V8DailyDerivedAlphaTask,
+    V8DailyDerivedFoundationTask,
+    V8DailyDerivedMainlineTask,
+    V8DailyOpsTask,
+    V8EventDailyTask,
+    V8EventPeriodicTask,
+    V8HistoricalBackfillTask,
+    V8IndexTask,
+    V8DailyMarketRawTask,
+    V8DailyReferenceRefreshTask,
+    V8RotationAuditTask,
+    V8RotationRepairTask,
+    V8RotationTask,
+    V8StockBasicTask,
+    V8StockFundamentalRefreshTask,
+    V8StockTask,
+    V8MonthlyOpsTask,
+    V8MonthlyAuditTask,
+    V8MonthlyDerivedTask,
+    V8MonthlyRefreshTask,
+    V8SwIndustryDailyTask,
+    V8WeeklyAuditTask,
+    V8WeeklyAuditIndexTask,
+    V8WeeklyAuditMarketTask,
+    V8WeeklyAuditStockTask,
+    V8WeeklyFinalizeTask,
+    V8WeeklyRefreshTask,
+    V8WeeklyOpsTask,
+)
 
 
 def _parse_args(argv: Optional[List[str]] = None):
     p = argparse.ArgumentParser(description="AsharesScraper Runner")
     p.add_argument("--asof", default="latest", help="run as-of trading day: latest or YYYYMMDD")
     p.add_argument("--days", type=int, default=1, help="lookback window days (used when --asof=latest and you want backfill)")
+    p.add_argument("--start-date", "--start_date", dest="start_date", default=None, help="explicit inclusive start date: YYYYMMDD or YYYY-MM-DD. Overrides --days when supplied.")
+    p.add_argument("--end-date", "--end_date", dest="end_date", default=None, help="explicit inclusive end date: latest, YYYYMMDD or YYYY-MM-DD. Defaults to --asof when omitted.")
     p.add_argument("--flag", default="tu", choices=["tu", "ak"], help="data source flag: tu=tushare (default), ak=akshare")
-    p.add_argument("--tasks", default="stock", help="comma-separated: stock,his_stocks,board,stock_basic,sw_industry,stock_fundamental,stock_quality_snapshot,stock_working_capital,inst_fund_hold,rotation,etf,index,futures,options,event,event_daily,event_periodic,audit,all")
+    p.add_argument("--tasks", default="stock", help="comma-separated: stock,his_stocks,board,stock_basic,sw_industry,stock_fundamental,stock_quality_snapshot,stock_working_capital,inst_fund_hold,rotation,etf,index,futures,options,event,event_daily,event_periodic,audit,v8_stock,v8_index,v8_board_refresh,v8_stock_basic,v8_sw_industry_daily,v8_rotation,v8_rotation_audit,v8_rotation_repair,v8_event_daily,v8_event_periodic,v8_stock_fundamental_refresh,v8_daily,v8_daily_market_raw,v8_daily_reference,v8_daily_audit,v8_daily_derived_foundation,v8_daily_derived_mainline,v8_daily_derived_alpha,v8_weekly,v8_weekly_refresh,v8_weekly_audit,v8_weekly_audit_stock,v8_weekly_audit_index,v8_weekly_audit_market,v8_weekly_finalize,v8_monthly,v8_monthly_refresh,v8_monthly_audit,v8_monthly_derived,v8_backfill,all")
     p.add_argument("--history-start", default="20000101", help="his_stocks only: YYYYMMDD or YYYY-MM")
     p.add_argument("--history-end", default="latest", help="his_stocks only: latest or YYYYMMDD or YYYY-MM")
     p.add_argument("--history-source-order", default="ak,yf", help="his_stocks only: comma-separated source priority, default ak,yf")
@@ -53,6 +87,20 @@ def _parse_args(argv: Optional[List[str]] = None):
     p.add_argument("--refresh", action="store_true", help="clear state files and refresh")
     p.add_argument("--no-vpn", action="store_true", help="skip wireguard start/stop")
     return p.parse_args(argv)
+
+
+def _normalize_runner_date(raw: str, latest_asof: str, label: str) -> str:
+    s = str(raw or "").strip()
+    if not s:
+        raise SystemExit(f"{label} is empty")
+    if s.lower() == "latest":
+        return latest_asof
+    if re.fullmatch(r"\d{8}", s):
+        datetime.strptime(s, "%Y%m%d")
+        return s
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        return datetime.strptime(s, "%Y-%m-%d").strftime("%Y%m%d")
+    raise SystemExit(f"Invalid {label} format: {raw}. Expected latest, YYYYMMDD, or YYYY-MM-DD.")
 
 
 def _normalize_history_date(raw: str, asof: str, is_end: bool) -> str:
@@ -130,9 +178,10 @@ def run(argv: Optional[List[str]] = None) -> None:
     else:
         asof = str(args.asof).strip()
 
-    # RunnerConfig: drive an asof-centric window.
-    # - --asof YYYYMMDD: strict single-day
-    # - --asof latest --days N: multi-day backfill [asof-(N-1), asof]
+    # RunnerConfig: date-window semantics
+    # - --start-date/--end-date: explicit inclusive range, preferred for manual backfill
+    # - otherwise --asof latest --days N: auto recent backfill [asof-(N-1), asof]
+    # - otherwise --asof YYYYMMDD --days N: explicit asof-centered recent window
     cfg = RunnerConfig(
         look_back_days=args.days,
         manual_stock_symbols=[],
@@ -142,16 +191,14 @@ def run(argv: Optional[List[str]] = None) -> None:
     )
     cfg.data_source_flag = str(args.flag or "tu").strip().lower()
 
-    # If user explicitly targets a day, allow multi-day window when --days > 1.
-    if asof and asof != "latest":
-        cfg.end_date = asof
-        if args.days and args.days > 1:
-            asof_dt = datetime.strptime(asof, "%Y%m%d")
-            cfg.start_date = (asof_dt - timedelta(days=args.days - 1)).strftime("%Y%m%d")
-        else:
-            cfg.start_date = asof
+    if args.start_date or args.end_date:
+        end_raw = args.end_date or asof
+        start_raw = args.start_date or end_raw
+        cfg.end_date = _normalize_runner_date(end_raw, asof, "--end-date")
+        cfg.start_date = _normalize_runner_date(start_raw, asof, "--start-date")
+        if cfg.start_date > cfg.end_date:
+            raise SystemExit(f"date window invalid: {cfg.start_date} > {cfg.end_date}")
     else:
-        # latest with 1-day or multi-day option
         cfg.end_date = asof
         if args.days and args.days > 1:
             asof_dt = datetime.strptime(asof, "%Y%m%d")
@@ -196,6 +243,36 @@ def run(argv: Optional[List[str]] = None) -> None:
         "options": OptionsLoaderTask,
         "audit": CoverageAuditTask,
         "rotation": SectorRotationSnapshotTask,
+        "v8_stock": V8StockTask,
+        "v8_index": V8IndexTask,
+        "v8_board_refresh": V8BoardRefreshTask,
+        "v8_stock_basic": V8StockBasicTask,
+        "v8_sw_industry_daily": V8SwIndustryDailyTask,
+        "v8_rotation": V8RotationTask,
+        "v8_rotation_audit": V8RotationAuditTask,
+        "v8_rotation_repair": V8RotationRepairTask,
+        "v8_event_daily": V8EventDailyTask,
+        "v8_event_periodic": V8EventPeriodicTask,
+        "v8_stock_fundamental_refresh": V8StockFundamentalRefreshTask,
+        "v8_daily": V8DailyOpsTask,
+        "v8_daily_market_raw": V8DailyMarketRawTask,
+        "v8_daily_reference": V8DailyReferenceRefreshTask,
+        "v8_daily_audit": V8DailyAuditTask,
+        "v8_daily_derived_foundation": V8DailyDerivedFoundationTask,
+        "v8_daily_derived_mainline": V8DailyDerivedMainlineTask,
+        "v8_daily_derived_alpha": V8DailyDerivedAlphaTask,
+        "v8_weekly": V8WeeklyOpsTask,
+        "v8_weekly_refresh": V8WeeklyRefreshTask,
+        "v8_weekly_audit": V8WeeklyAuditTask,
+        "v8_weekly_audit_stock": V8WeeklyAuditStockTask,
+        "v8_weekly_audit_index": V8WeeklyAuditIndexTask,
+        "v8_weekly_audit_market": V8WeeklyAuditMarketTask,
+        "v8_weekly_finalize": V8WeeklyFinalizeTask,
+        "v8_monthly": V8MonthlyOpsTask,
+        "v8_monthly_refresh": V8MonthlyRefreshTask,
+        "v8_monthly_audit": V8MonthlyAuditTask,
+        "v8_monthly_derived": V8MonthlyDerivedTask,
+        "v8_backfill": V8HistoricalBackfillTask,
     }
 
     unknown = [t for t in selected if t not in tasks_map]
@@ -215,7 +292,7 @@ def run(argv: Optional[List[str]] = None) -> None:
     ctx = RunContext(config=cfg, engine=engine, log=log)
 
     # Preserve a stable execution order + rotation
-    order = ["his_stocks", "stock", "board", "stock_basic", "sw_industry", "stock_fundamental", "stock_quality_snapshot", "stock_working_capital", "inst_fund_hold", "rotation", "event", "event_daily", "event_periodic", "etf", "index", "futures", "options", "audit"]
+    order = ["v8_backfill", "v8_stock", "v8_index", "v8_board_refresh", "v8_stock_basic", "v8_sw_industry_daily", "v8_rotation", "v8_rotation_audit", "v8_rotation_repair", "v8_event_daily", "v8_event_periodic", "v8_stock_fundamental_refresh", "v8_daily", "v8_daily_market_raw", "v8_daily_reference", "v8_daily_audit", "v8_daily_derived_foundation", "v8_daily_derived_mainline", "v8_daily_derived_alpha", "v8_weekly", "v8_weekly_refresh", "v8_weekly_audit", "v8_weekly_audit_stock", "v8_weekly_audit_index", "v8_weekly_audit_market", "v8_weekly_finalize", "v8_monthly", "v8_monthly_refresh", "v8_monthly_audit", "v8_monthly_derived", "his_stocks", "stock", "board", "stock_basic", "sw_industry", "stock_fundamental", "stock_quality_snapshot", "stock_working_capital", "inst_fund_hold", "rotation", "event", "event_daily", "event_periodic", "etf", "index", "futures", "options", "audit"]
     for name in order:
         if name in selected:
             tasks.append(tasks_map[name]())

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
  
+import os
 import random
 import json
 import re
@@ -18,13 +19,44 @@ import pandas as pd
 from app.tasks.db_accessor import DbAccessor
 from app.tasks.state_store import StateStore
 from app.utils.wireguard_helper import activate_tunnel, deactivate_tunnel, switch_wire_guard
+from app.utils.tushare_pro_client import build_tushare_pro_client
 import akshare as ak 
-import tushare as ts
 from app.tools.sync_cn_stock_daily_price_from_tushare import resolve_tushare_token, patch_pandas_fillna_method_compat
 
 @dataclass
 class IndexLoaderTask:
     name: str = "IndexLoader"
+
+    def _tushare_min_interval_seconds(self) -> float:
+        return max(0.0, float(os.getenv("INDEX_TUSHARE_MIN_INTERVAL_SECONDS", "0.8")))
+
+    def _respect_tushare_spacing(self) -> None:
+        min_interval = self._tushare_min_interval_seconds()
+        now = time.monotonic()
+        last_call_at = getattr(self, "_ts_last_call_at", None)
+        if last_call_at is not None:
+            elapsed = now - last_call_at
+            remaining = min_interval - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
+        self._ts_last_call_at = time.monotonic()
+
+    def _init_tushare_if_needed(self, *, force: bool = False) -> None:
+        if self.data_source_flag != "tu" and not force:
+            return
+        if self._ts_token and self._ts_pro is not None:
+            return
+        patch_pandas_fillna_method_compat()
+        token, tried_files = resolve_tushare_token("", "")
+        self._ts_token = token.strip() if token else ""
+        if not self._ts_token:
+            msg = "[INDEX] Tushare token not found"
+            if tried_files:
+                msg += f"; tried_files={', '.join(str(p) for p in tried_files)}"
+            raise RuntimeError(msg)
+        timeout_seconds = max(5.0, float(os.getenv("INDEX_TUSHARE_TIMEOUT_SECONDS", os.getenv("TUSHARE_PRO_TIMEOUT_SECONDS", "30"))))
+        self._ts_pro = build_tushare_pro_client(self._ts_token, timeout=timeout_seconds)
+        self._ts_last_call_at = None
 
     def run(self, ctx) -> None:
         cfg = ctx.config
@@ -45,14 +77,7 @@ class IndexLoaderTask:
         self.log.info(f"[START][INDEX] window={cfg.start_date}~{cfg.end_date} | indices={len(indices)} | source={self.data_source_flag}")
         if self.data_source_flag == "tu":
             try:
-                patch_pandas_fillna_method_compat()
-                token, tried_files = resolve_tushare_token("", "")
-                self._ts_token = token.strip() if token else ""
-                if not self._ts_token:
-                    msg = "[INDEX] Tushare token not found"
-                    if tried_files:
-                        msg += f"; tried_files={', '.join(str(p) for p in tried_files)}"
-                    raise RuntimeError(msg)
+                self._init_tushare_if_needed()
             except Exception as e:
                 raise RuntimeError(f"[INDEX] initialize tushare failed: {e}") from e
         activate_tunnel("cn")
@@ -71,16 +96,7 @@ class IndexLoaderTask:
 
             try:
                 existing = db.get_existing_index_days(index_code, cfg.start_date, cfg.end_date)
-                 
-                if index_code =="sh000688":
-                    df = self._load_sh000688_from_sohu_csv(
-                        index_code=index_code,
-                        start_date=cfg.start_date,
-                        end_date=cfg.end_date,
-                        tmp_csv_dir=tmp_csv_dir,
-                    )
-                else:
-                    df = self._load_index_price_with_failover( index_code, cfg.start_date, cfg.end_date)
+                df = self._load_index_price_best_effort(index_code, cfg.start_date, cfg.end_date, tmp_csv_dir)
                 if df is None or df.empty:
                     raise RuntimeError("empty index data")
 
@@ -116,6 +132,39 @@ class IndexLoaderTask:
         #state.save_scanned(scanned)
         #state.save_failed(failed)
         self.log.info("[DONE][INDEX] loader finished")
+        if hasattr(self._ts_pro, "close"):
+            self._ts_pro.close()
+
+    def repair_specific_dates(self, ctx, index_code: str, dates: list[date]) -> int:
+        if not dates:
+            return 0
+        self.log = ctx.log
+        self.engine = ctx.engine
+        self.data_source_flag = str(getattr(ctx.config, "data_source_flag", "tu") or "tu").strip().lower()
+        self._ts_pro = None
+        self._ts_token = None
+        # Targeted index repair must use Tushare index_daily as the canonical source.
+        # This avoids the deprecated Sohu path and keeps local index symbols aligned
+        # with cn_index_daily_price.index_code while querying Tushare ts_code.
+        self._init_tushare_if_needed(force=True)
+        db = DbAccessor(ctx.engine, self.log)
+        tmp_csv_dir = ctx.config.state_dir / "tmp_csv"
+        local_index_code, ts_code = self._normalize_index_symbol_pair(index_code)
+        self.log.info("[INDEX][REPAIR][TU] symbol align requested=%s local=%s tushare=%s", index_code, local_index_code, ts_code)
+        inserted_total = 0
+        for dt_value in sorted(set(dates)):
+            date8 = pd.to_datetime(dt_value).strftime("%Y%m%d")
+            existing = db.get_existing_index_days(local_index_code, date8, date8)
+            if dt_value in existing:
+                continue
+            df = self._load_index_price_best_effort(local_index_code, date8, date8, tmp_csv_dir)
+            if df is None or df.empty:
+                self.log.warning("[INDEX][REPAIR] %s %s no data returned from Tushare index_daily", local_index_code, date8)
+                continue
+            inserted_total += db.insert_missing_index_days(local_index_code, df, {dt_value})
+        if hasattr(self._ts_pro, "close"):
+            self._ts_pro.close()
+        return inserted_total
 
     # ------------------------
     def _load_index_price_with_failover(self,   index_code: str, start_date: str, end_date: str) -> pd.DataFrame | None:
@@ -123,27 +172,142 @@ class IndexLoaderTask:
             return self._load_index_price_tushare(index_code, start_date, end_date)
         return self.load_index_price_em(index_code=index_code, start_date=start_date, end_date=end_date)
 
-    def _load_index_price_tushare(self, index_code: str, start_date: str, end_date: str) -> pd.DataFrame | None:
-        if not self._ts_token:
-            return None
-        if self._ts_pro is None:
-            self._ts_pro = ts.pro_api(self._ts_token)
+    def _load_index_price_best_effort(self, index_code: str, start_date: str, end_date: str, tmp_csv_dir: Path) -> pd.DataFrame | None:
+        """Load index daily price using Tushare index_daily as the canonical source.
 
-        code_clean = str(index_code).strip().lower()
-        if code_clean.startswith(("sh", "sz")) and len(code_clean) >= 8:
-            code6 = code_clean[2:]
-            sfx = code_clean[:2].upper()
-        else:
-            code6 = code_clean
-            sfx = "SZ" if code6.startswith(("0", "3")) else "SH"
-        ts_code = f"{code6}.{sfx}"
+        Local DB symbols stay unchanged, e.g. sh000001 / sz399001 / sh000688.
+        Only the outbound query symbol is converted to Tushare ts_code, e.g.
+        000001.SH / 399001.SZ / 000688.SH. Sohu is intentionally not used.
+        """
+        primary = None
+        secondary = None
 
-        df = self._ts_pro.index_daily(
-            ts_code=ts_code,
-            start_date=pd.to_datetime(start_date).strftime("%Y%m%d"),
-            end_date=pd.to_datetime(end_date).strftime("%Y%m%d"),
+        local_code, ts_code = self._normalize_index_symbol_pair(index_code)
+        self.log.info(
+            "[INDEX][TU] load index_code=%s normalized_local=%s ts_code=%s start=%s end=%s",
+            index_code,
+            local_code,
+            ts_code,
+            start_date,
+            end_date,
         )
+
+        try:
+            # Always prefer Tushare for index load / targeted repair.
+            primary = self._load_index_price_tushare(index_code, start_date, end_date)
+        except Exception as exc:
+            self.log.warning("[INDEX][TU] load failed for %s: %s", index_code, exc)
+
+        # Optional fallback kept disabled by default to keep index repair deterministic.
+        # Enable only if a temporary Tushare outage blocks urgent backfill.
+        allow_em_fallback = str(os.getenv("INDEX_ALLOW_EM_FALLBACK", "0")).strip().lower() in {"1", "true", "yes", "y"}
+        if allow_em_fallback:
+            try:
+                secondary = self.load_index_price_em(index_code=index_code, start_date=start_date, end_date=end_date)
+            except Exception as exc:
+                self.log.warning("[INDEX] EM fallback load failed for %s: %s", index_code, exc)
+
+        merged = self._merge_index_frames(primary, secondary, prefer="primary")
+        if merged is None or merged.empty:
+            return None
+        return merged
+
+    @staticmethod
+    def _normalize_index_symbol_pair(index_code: str) -> tuple[str, str]:
+        """Return (local_index_code, tushare_ts_code).
+
+        Local DB code examples:
+            sh000001 -> 000001.SH
+            sz399001 -> 399001.SZ
+            sh000688 -> 000688.SH
+
+        If a caller already passes Tushare style, keep the Tushare code and infer
+        the local code used by cn_index_daily_price.
+        """
+        raw = str(index_code or "").strip()
+        if not raw:
+            raise ValueError("index_code must be non-empty")
+
+        upper = raw.upper()
+        lower = raw.lower()
+
+        if "." in upper:
+            code6, suffix = upper.split(".", 1)
+            suffix = suffix[:2]
+            if suffix not in {"SH", "SZ"}:
+                raise ValueError(f"unsupported Tushare index suffix: {raw}")
+            local = ("sh" if suffix == "SH" else "sz") + code6.zfill(6)
+            return local, f"{code6.zfill(6)}.{suffix}"
+
+        if lower.startswith(("sh", "sz")) and len(lower) >= 8:
+            prefix = lower[:2]
+            code6 = lower[2:8]
+            suffix = "SH" if prefix == "sh" else "SZ"
+            return f"{prefix}{code6}", f"{code6}.{suffix}"
+
+        code6 = lower[-6:].zfill(6)
+        # A-share index convention: 399xxx is SZ; most 000xxx/000688/000300/000905/000852 are SH.
+        suffix = "SZ" if code6.startswith("399") else "SH"
+        local = ("sh" if suffix == "SH" else "sz") + code6
+        return local, f"{code6}.{suffix}"
+
+    def _merge_index_frames(self, primary: pd.DataFrame | None, secondary: pd.DataFrame | None, prefer: str = "primary") -> pd.DataFrame | None:
+        frames: list[pd.DataFrame] = []
+        for frame in [primary, secondary]:
+            if frame is None or frame.empty:
+                continue
+            work = frame.copy()
+            work["trade_date"] = pd.to_datetime(work["trade_date"], errors="coerce")
+            frames.append(work)
+        if not frames:
+            return None
+        if len(frames) == 1:
+            return frames[0].sort_values("trade_date").reset_index(drop=True)
+
+        keep_cols = ["trade_date", "open", "close", "high", "low", "volume", "amount", "source", "pre_close", "chg_pct"]
+        priority = [0, 1] if prefer == "primary" else [1, 0]
+        combined = pd.concat([frames[i] for i in priority], ignore_index=True)
+        combined = combined.sort_values("trade_date").drop_duplicates(subset=["trade_date"], keep="first").reset_index(drop=True)
+        for col in keep_cols:
+            if col not in combined.columns:
+                combined[col] = None
+        return combined[keep_cols].dropna(subset=["trade_date", "close"]).copy()
+
+    def _load_index_price_tushare(self, index_code: str, start_date: str, end_date: str) -> pd.DataFrame | None:
+        if not self._ts_token or self._ts_pro is None:
+            self._init_tushare_if_needed(force=True)
+
+        local_index_code, ts_code = self._normalize_index_symbol_pair(index_code)
+        self.log.info("[INDEX][TU] symbol align local=%s tushare=%s", local_index_code, ts_code)
+        max_attempts = max(1, int(os.getenv("INDEX_TUSHARE_MAX_ATTEMPTS", "3")))
+        retry_sleep_seconds = max(1.0, float(os.getenv("INDEX_TUSHARE_RETRY_SLEEP_SECONDS", "3")))
+        df = None
+        last_error = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self._respect_tushare_spacing()
+                df = self._ts_pro.index_daily(
+                    ts_code=ts_code,
+                    start_date=pd.to_datetime(start_date).strftime("%Y%m%d"),
+                    end_date=pd.to_datetime(end_date).strftime("%Y%m%d"),
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt >= max_attempts:
+                    raise
+                self.log.warning(
+                    "[INDEX][TU] %s attempt %s/%s failed: %s; retry in %.1fs",
+                    index_code,
+                    attempt,
+                    max_attempts,
+                    exc,
+                    retry_sleep_seconds,
+                )
+                time.sleep(retry_sleep_seconds)
         if df is None or df.empty:
+            if last_error is not None:
+                self.log.info(last_error)
             return None
 
         df = df.rename(
@@ -159,7 +323,7 @@ class IndexLoaderTask:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         df = df.sort_values("trade_date").reset_index(drop=True)
-        df["source"] = "tushare"
+        df["source"] = "tushare:index_daily"
 
         keep = ["trade_date","open","close","high","low","volume","amount","source","pre_close","chg_pct"]
         for c in keep:

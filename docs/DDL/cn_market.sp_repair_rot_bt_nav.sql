@@ -4,19 +4,19 @@
 DROP PROCEDURE IF EXISTS `SP_REPAIR_ROT_BT_NAV`;
 
 CREATE PROCEDURE `SP_REPAIR_ROT_BT_NAV`(
-    IN p_run_id VARCHAR(128),
+    IN p_run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
     IN p_default_nav DECIMAL(18,10)
 )
 proc: BEGIN
-    DECLARE v_run_id VARCHAR(128);
+    DECLARE v_run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
     DECLARE v_default_nav DECIMAL(18,10);
 
-    SET v_run_id = NULLIF(p_run_id, '');
+    SET v_run_id = NULLIF(p_run_id, ('' COLLATE utf8mb4_unicode_ci));
     SET v_default_nav = COALESCE(p_default_nav, 1.0000000000);
 
     DROP TEMPORARY TABLE IF EXISTS tmp_bt_nav_fix;
     CREATE TEMPORARY TABLE tmp_bt_nav_fix (
-        run_id VARCHAR(64) NOT NULL,
+        run_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
         trade_date DATE NOT NULL,
         nav_new DECIMAL(18,10) NOT NULL,
         PRIMARY KEY (run_id, trade_date)
@@ -37,7 +37,7 @@ proc: BEGIN
         ), v_default_nav) AS nav_new
     FROM cn_sector_rot_bt_daily_t b
     WHERE b.nav IS NULL
-      AND (v_run_id IS NULL OR b.run_id = v_run_id);
+      AND (v_run_id IS NULL OR b.run_id = (v_run_id COLLATE utf8mb4_unicode_ci));
 
     UPDATE cn_sector_rot_bt_daily_t b
     JOIN tmp_bt_nav_fix t

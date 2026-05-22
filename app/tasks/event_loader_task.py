@@ -11,7 +11,6 @@ from app.tools.sync_cn_stock_event_tushare import (
     ensure_tables,
     load_forecast,
     load_express,
-    load_fina_indicator,
     load_disclosure_date,
     load_dividend,
     load_anns_d,
@@ -92,19 +91,27 @@ class EventLoaderTask:
             db_max = _max_date(ctx.engine, table, col)
             if db_max is None:
                 return max(full_start, requested_start)
+
+            # Historical backfill mode:
+            # If the table already contains data beyond the requested end_date
+            # (e.g. table is populated through 2026 while we are rebuilding 2010),
+            # incremental logic would incorrectly produce a start date after end_date,
+            # causing all loaders to return 0/0. In this case, rebuild the requested
+            # window explicitly.
+            if db_max > end_date:
+                return max(full_start, requested_start)
+
             return max(full_start, requested_start, db_max - timedelta(days=buffer_days))
 
         start_forecast = resolve_start("cn_event_earnings_forecast", "ann_date") if run_daily else end_date
         start_express = resolve_start("cn_event_earnings_express", "ann_date") if run_daily else end_date
         start_disclosure = resolve_start("cn_event_disclosure_date", "end_date") if run_daily else end_date
-        start_fina = resolve_start("cn_event_fina_indicator", "ann_date") if run_periodic else end_date
         start_dividend = resolve_start("cn_event_dividend", "ann_date") if run_periodic else end_date
         start_anns = resolve_start("cn_event_announcement_meta", "ann_date") if run_daily and with_anns else end_date
 
         rows_forecast = aff_forecast = 0
         rows_express = aff_express = 0
         rows_disclosure = aff_disclosure = 0
-        rows_fina = aff_fina = 0
         rows_dividend = aff_dividend = 0
         rows_anns = aff_anns = 0
         signal_sources: set[str] = set()
@@ -117,10 +124,7 @@ class EventLoaderTask:
             signal_sources.update({"forecast", "express"})
             signal_start_dates.extend([start_forecast, start_express])
             if with_anns:
-                try:
-                    rows_anns, aff_anns = load_anns_d(ctx.engine, pro, start_anns, end_date, "tushare_anns_d", log=ctx.log)
-                except Exception as e:
-                    ctx.log.warning("[event] anns_d skipped: %s", e)
+                rows_anns, aff_anns = load_anns_d(ctx.engine, pro, start_anns, end_date, "tushare_anns_d", log=ctx.log)
 
         if run_periodic:
             raw_symbols = str(os.getenv("EVENT_SYMBOLS", "")).strip()
@@ -133,22 +137,24 @@ class EventLoaderTask:
                     rows = conn.execute(text("SELECT DISTINCT symbol FROM cn_stock_daily_price ORDER BY symbol LIMIT :n"), {"n": max_symbols}).fetchall()
                 symbols = [str(row[0]).strip() for row in rows if str(row[0]).strip()]
 
-            rows_fina, aff_fina = load_fina_indicator(ctx.engine, pro, start_fina, end_date, "tushare_fina_indicator", symbols=symbols if symbols else None, log=ctx.log)
+            # fina_indicator is intentionally NOT loaded from EventLoaderTask.
+            # Tushare requires ts_code for fina_indicator and this data belongs to
+            # StockFundamentalMonthlyTask / cn_stock_fina_indicator. Keeping it here
+            # causes monthly.bat to fail with: 必填参数, ts_code.
             rows_dividend, aff_dividend = load_dividend(ctx.engine, pro, start_dividend, end_date, "tushare_dividend", log=ctx.log)
-            signal_sources.update({"fina_indicator", "dividend"})
-            signal_start_dates.extend([start_fina, start_dividend])
+            signal_sources.update({"dividend"})
+            signal_start_dates.extend([start_dividend])
 
         if with_signal and signal_sources:
             rebuild_event_signal_daily(ctx.engine, min(signal_start_dates), end_date, include_sources=signal_sources)
 
         report_path = save_quality_report(ctx.engine, audit_dir)
         ctx.log.info(
-            "[event:%s] done forecast=%s/%s express=%s/%s disclosure=%s/%s fina=%s/%s dividend=%s/%s anns=%s/%s report=%s",
+            "[event:%s] done forecast=%s/%s express=%s/%s disclosure=%s/%s dividend=%s/%s anns=%s/%s report=%s",
             frequency_tag,
             rows_forecast, aff_forecast,
             rows_express, aff_express,
             rows_disclosure, aff_disclosure,
-            rows_fina, aff_fina,
             rows_dividend, aff_dividend,
             rows_anns, aff_anns,
             report_path,

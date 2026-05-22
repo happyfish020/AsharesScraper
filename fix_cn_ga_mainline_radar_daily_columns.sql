@@ -1,0 +1,9 @@
+ALTER TABLE cn_ga_mainline_radar_daily
+  ADD COLUMN IF NOT EXISTS leader_density DECIMAL(12,4) NULL,
+  ADD COLUMN IF NOT EXISTS new_high_ratio DECIMAL(12,4) NULL,
+  ADD COLUMN IF NOT EXISTS breakout_ratio DECIMAL(12,4) NULL,
+  ADD COLUMN IF NOT EXISTS trend_alignment_score DECIMAL(12,4) NULL,
+  ADD COLUMN IF NOT EXISTS strong_stock_count INT NULL,
+  ADD COLUMN IF NOT EXISTS mainline_confidence DECIMAL(12,4) NULL,
+  ADD COLUMN IF NOT EXISTS rotation_rank INT NULL,
+  ADD COLUMN IF NOT EXISTS mainline_phase VARCHAR(32) NULL;

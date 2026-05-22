@@ -3,12 +3,12 @@
 DROP PROCEDURE IF EXISTS `SP_BACKFILL_ROT_BT_FROM_PRICE`;
 
 CREATE PROCEDURE `SP_BACKFILL_ROT_BT_FROM_PRICE`(
-    IN p_run_id VARCHAR(64),
+    IN p_run_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
     IN p_end_date DATE,
     IN p_force TINYINT
 )
 proc: BEGIN
-    DECLARE v_run_id VARCHAR(64);
+    DECLARE v_run_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
     DECLARE v_end_date DATE;
     DECLARE v_min_px_date DATE;
     DECLARE v_last_bt_date DATE;
@@ -26,19 +26,19 @@ proc: BEGIN
     SET v_last_bt_date = (
         SELECT MAX(b.trade_date)
         FROM cn_sector_rot_bt_daily_t b
-        WHERE b.run_id = v_run_id
+        WHERE b.run_id = (v_run_id COLLATE utf8mb4_unicode_ci)
           AND b.trade_date <= v_end_date
     );
 
     IF IFNULL(p_force, 0) = 1 THEN
         SET v_start_date = COALESCE(v_last_bt_date, v_min_px_date);
         DELETE FROM cn_sector_rot_bt_daily_t
-        WHERE run_id = v_run_id
+        WHERE run_id = (v_run_id COLLATE utf8mb4_unicode_ci)
           AND trade_date BETWEEN v_start_date AND v_end_date;
         SET v_base_nav = (
             SELECT b.nav
             FROM cn_sector_rot_bt_daily_t b
-            WHERE b.run_id = v_run_id
+            WHERE b.run_id = (v_run_id COLLATE utf8mb4_unicode_ci)
               AND b.trade_date < v_start_date
               AND b.nav IS NOT NULL
             ORDER BY b.trade_date DESC
@@ -53,7 +53,7 @@ proc: BEGIN
             SET v_base_nav = (
                 SELECT b.nav
                 FROM cn_sector_rot_bt_daily_t b
-                WHERE b.run_id = v_run_id
+                WHERE b.run_id = (v_run_id COLLATE utf8mb4_unicode_ci)
                   AND b.trade_date = v_last_bt_date
                   AND b.nav IS NOT NULL
                 LIMIT 1
@@ -62,7 +62,7 @@ proc: BEGIN
                 SET v_base_nav = (
                     SELECT b.nav
                     FROM cn_sector_rot_bt_daily_t b
-                    WHERE b.run_id = v_run_id
+                    WHERE b.run_id = (v_run_id COLLATE utf8mb4_unicode_ci)
                       AND b.trade_date <= v_last_bt_date
                       AND b.nav IS NOT NULL
                     ORDER BY b.trade_date DESC
@@ -101,7 +101,7 @@ proc: BEGIN
     LEFT JOIN (
         SELECT trade_date, COUNT(*) AS n_pos
         FROM cn_sector_rot_pos_daily_t
-        WHERE run_id = v_run_id
+        WHERE run_id = (v_run_id COLLATE utf8mb4_unicode_ci)
           AND w > 0
           AND trade_date BETWEEN v_start_date AND v_end_date
         GROUP BY trade_date
@@ -111,14 +111,14 @@ proc: BEGIN
         SELECT signal_date AS trade_date, MAX(CAST(IFNULL(entry_cnt, 0) AS SIGNED)) AS k_used
         FROM cn_sector_rotation_signal_t
         WHERE signal_date BETWEEN v_start_date AND v_end_date
-          AND action = 'ENTER'
+          AND action = ('ENTER' COLLATE utf8mb4_unicode_ci)
         GROUP BY signal_date
     ) sg
       ON sg.trade_date = d.trade_date
     WHERE NOT EXISTS (
         SELECT 1
         FROM cn_sector_rot_bt_daily_t b
-        WHERE b.run_id = v_run_id
+        WHERE b.run_id = (v_run_id COLLATE utf8mb4_unicode_ci)
           AND b.trade_date = d.trade_date
     )
     ORDER BY d.trade_date;

@@ -263,14 +263,14 @@ def build_role_map(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame({
         "trade_date": df["trade_date"],
         "symbol": df["symbol"],
-        "stock_name": df["name"],
+        "stock_name": df["name"].fillna(""),
         "mainline_id": df["industry_id"],
         "mainline_name": df["industry_name"],
         "leader_score": df["leader_score"],
         "leader_bucket": df["leader_bucket_full"],
         "rs_percentile": df["rs_percentile"],
         "turnover_20d_percentile": df["turnover_20d_percentile"],
-        "amount_rank_in_mainline": df["turnover_rank_in_industry"],
+        "amount_rank_in_mainline": df["turnover_rank_in_industry"].fillna(0).astype(int),
         "rs_rank_in_mainline": df["rs_rank_in_mainline"],
         "stock_role": df["stock_role"],
         "role_score": df["role_score"],
@@ -308,7 +308,8 @@ def write_rows(engine: Engine, df: pd.DataFrame, dry_run: bool) -> int:
         "amount_rank_in_mainline", "rs_rank_in_mainline", "stock_role",
         "role_score", "role_reason",
     ]
-    records = df[cols].to_dict("records")
+    write_df = df[cols].copy()
+    records = write_df.astype(object).where(pd.notna(write_df), None).to_dict(orient="records")
 
     sql = """
         INSERT INTO cn_ga_stock_role_map_daily

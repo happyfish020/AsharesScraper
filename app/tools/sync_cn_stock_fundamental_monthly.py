@@ -432,7 +432,7 @@ def get_trade_month_dates(engine, start_date: date, end_date: date, calendar_sou
         extra_where = ""
     elif calendar_source == "board-map":
         source_table = "cn_board_member_map_d"
-        extra_where = "AND sector_type='INDUSTRY' AND sector_id LIKE 'BK%%'"
+        extra_where = "AND sector_type='INDUSTRY'"
     else:
         raise ValueError(f"unsupported calendar_source: {calendar_source}")
 

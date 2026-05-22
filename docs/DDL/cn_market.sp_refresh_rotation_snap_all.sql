@@ -3,13 +3,13 @@
 DROP PROCEDURE IF EXISTS `SP_REFRESH_ROTATION_SNAP_ALL`;
 
 CREATE PROCEDURE `SP_REFRESH_ROTATION_SNAP_ALL`(
-    IN p_run_id VARCHAR(64),
+    IN p_run_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
     IN p_trade_date DATE,
     IN p_force TINYINT
 )
 proc: BEGIN
     DECLARE v_trade_date DATE;
-    DECLARE v_run_id VARCHAR(64);
+    DECLARE v_run_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
     DECLARE v_has_entry BIGINT DEFAULT 0;
     DECLARE v_has_holding BIGINT DEFAULT 0;
     DECLARE v_has_exit BIGINT DEFAULT 0;

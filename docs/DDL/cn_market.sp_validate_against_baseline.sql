@@ -3,14 +3,14 @@
 DROP PROCEDURE IF EXISTS `SP_VALIDATE_AGAINST_BASELINE`;
 
 CREATE PROCEDURE `SP_VALIDATE_AGAINST_BASELINE`(
-    IN p_run_id VARCHAR(128),
-    IN p_baseline_id VARCHAR(64),
+    IN p_run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
+    IN p_baseline_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
     IN p_min_alpha DECIMAL(18,10)
 )
 proc: BEGIN
-    DECLARE v_run_id VARCHAR(128);
-    DECLARE v_baseline_key VARCHAR(64);
-    DECLARE v_baseline_run_id VARCHAR(128);
+    DECLARE v_run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    DECLARE v_baseline_key VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    DECLARE v_baseline_run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
     DECLARE v_asof DATE;
     DECLARE v_nav_run DECIMAL(18,10);
     DECLARE v_nav_base DECIMAL(18,10);

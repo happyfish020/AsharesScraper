@@ -82,6 +82,17 @@ class StockLoaderTask:
         else:
             work_symbols = self._get_all_symbols_from_spot(use_cache=True)
 
+        stock_daily_mode = str(os.getenv("V8_STOCK_DAILY_MODE", "")).strip().lower()
+        if self.data_source_flag == "tu" and stock_daily_mode in {"spot", "spot_repair", "date", "date_repair"}:
+            ok = self._load_tushare_date_level_spot_repair(
+                trade_date=cfg.end_date,
+                mode=stock_daily_mode,
+            )
+            if ok:
+                self._refresh_stock_active_universe_status()
+                return
+            self.log.info("[STOCK][TU] date-level spot repair failed, fallback to per-symbol fetch")
+
         if cfg.look_back_days == 1 and self.data_source_flag == "tu":
             ok = self._load_tushare_latest_day_smart(
                 db=db,
@@ -473,6 +484,99 @@ class StockLoaderTask:
             sample = sorted(missing_latest)[:20]
             raise RuntimeError(f"[STOCK][TU] final verify failed: latest trade_date missing symbols={len(missing_latest)} sample={sample}")
         self.log.info(f"[STOCK][TU] final verify PASS: latest trade_date={target} symbols={len(expected_symbols)}")
+
+    def _existing_stock_daily_count(self, trade_dt: date) -> int:
+        with self.engine.connect() as conn:
+            value = conn.execute(
+                text("SELECT COUNT(DISTINCT symbol) FROM cn_stock_daily_price WHERE trade_date = :dt"),
+                {"dt": trade_dt},
+            ).scalar()
+        return int(value or 0)
+
+    def _load_tushare_date_level_spot_repair(self, trade_date: str, mode: str) -> bool:
+        """Date-level daily repair/update for Tushare.
+
+        This avoids the slow per-symbol coverage scan. For recent trade dates,
+        fetch one full-market Tushare daily snapshot per date and compare source
+        row count vs existing DB row count. If missing rows exceed the configured
+        threshold, overwrite that whole trade_date using bulk upsert.
+        """
+        try:
+            target_date = self._yyyymmdd_to_date(trade_date)
+            lookback_calendar_days = int(os.getenv("V8_STOCK_SPOT_REPAIR_CALENDAR_DAYS", "45"))
+            repair_trade_days = int(
+                os.getenv(
+                    "V8_STOCK_SPOT_REPAIR_LOOKBACK_DAYS",
+                    os.getenv("V8_DAILY_REPAIR_LOOKBACK_DAYS", "15"),
+                )
+            )
+            missing_threshold = int(os.getenv("V8_STOCK_SPOT_REPAIR_MISSING_THRESHOLD", "1000"))
+            force_latest = str(os.getenv("V8_STOCK_SPOT_FORCE_LATEST", "1")).strip().lower() in {"1", "true", "yes", "on"}
+
+            trade_dates = self._get_tushare_trade_dates(trade_date, lookback_calendar_days=lookback_calendar_days)
+            trade_dates = [d for d in trade_dates if d <= target_date]
+            if not trade_dates:
+                self.log.info(f"[STOCK][TU][SPOT_REPAIR] no open trade dates up to {trade_date}; skip")
+                return True
+            target_open_date = trade_dates[-1]
+            audit_dates = trade_dates[-max(1, repair_trade_days):]
+
+            self.log.info(
+                f"[STOCK][TU][SPOT_REPAIR] mode={mode} target={target_open_date} "
+                f"audit_trade_days={len(audit_dates)} threshold={missing_threshold} force_latest={force_latest}"
+            )
+
+            repaired_dates: list[date] = []
+            # Build name→symbol mapping from spot universe so that
+            # _overwrite_tushare_daily_rows writes correct stock names
+            # instead of falling back to symbol values.
+            name_by_symbol: Dict[str, str] = {}
+            try:
+                work_symbols = self._get_all_symbols_from_spot(use_cache=True)
+                name_by_symbol = {normalize_stock_code(s): n for n, s in work_symbols}
+            except Exception:
+                self.log.warning("[STOCK][TU][SPOT_REPAIR] failed to load name_by_symbol from spot; names may fall back to symbol")
+
+            for idx, dt_value in enumerate(audit_dates, start=1):
+                trade_date8 = dt_value.strftime("%Y%m%d")
+                daily_df = self._fetch_tushare_daily_by_trade_date(trade_date8)
+                if daily_df is None or daily_df.empty:
+                    self.log.warning(f"[STOCK][TU][SPOT_REPAIR] source empty trade_date={trade_date8}; skip")
+                    continue
+
+                expected_count = int(daily_df["symbol"].dropna().astype(str).map(normalize_stock_code).nunique())
+                existing_count = self._existing_stock_daily_count(dt_value)
+                missing_count = max(0, expected_count - existing_count)
+                should_repair = missing_count >= missing_threshold
+                if mode in {"spot", "date"} and dt_value == target_open_date and missing_count > 0:
+                    should_repair = True
+                if force_latest and dt_value == target_open_date:
+                    should_repair = True
+
+                self.log.info(
+                    f"[STOCK][TU][SPOT_REPAIR] ({idx}/{len(audit_dates)}) "
+                    f"trade_date={trade_date8} expected={expected_count} existing={existing_count} "
+                    f"missing={missing_count} repair={should_repair}"
+                )
+
+                if not should_repair:
+                    continue
+
+                inserted = self._overwrite_tushare_daily_rows(daily_df, trade_date8, name_by_symbol)
+                repaired_dates.append(dt_value)
+                self.log.info(f"[STOCK][TU][SPOT_REPAIR] fixed trade_date={trade_date8} overwritten_rows={inserted}")
+                time.sleep(random.uniform(0.10, 0.25))
+
+            verify_dates = repaired_dates or [target_open_date]
+            self._verify_tushare_trade_dates_complete(verify_dates)
+            self.log.info(
+                f"[DONE][STOCK][TU][SPOT_REPAIR] repaired_dates={len(repaired_dates)} "
+                f"audited_dates={len(audit_dates)}"
+            )
+            return True
+        except Exception as e:
+            self.log.warning(f"[STOCK][TU][SPOT_REPAIR] failed: {e}")
+            return False
 
     def _load_tushare_latest_day_smart(self, db: DbAccessor, work_symbols: List[Tuple[str, str]], trade_date: str) -> bool:
         try:

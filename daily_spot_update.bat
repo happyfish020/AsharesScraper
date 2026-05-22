@@ -1,0 +1,131 @@
+@echo off
+setlocal EnableExtensions DisableDelayedExpansion
+
+set "SCRIPT_DIR=%~dp0"
+
+set "PYTHON_EXE=python"
+if exist "%LOCALAPPDATA%\Python\pythoncore-3.14-64\python.exe" (
+    set "PYTHON_EXE=%LOCALAPPDATA%\Python\pythoncore-3.14-64\python.exe"
+)
+
+if "%V8_DAILY_UPDATE_LOOKBACK_DAYS%"=="" set "V8_DAILY_UPDATE_LOOKBACK_DAYS=7"
+if "%V8_STOCK_SPOT_REPAIR_LOOKBACK_DAYS%"=="" set "V8_STOCK_SPOT_REPAIR_LOOKBACK_DAYS=7"
+if "%V8_STOCK_SPOT_REPAIR_MISSING_THRESHOLD%"=="" set "V8_STOCK_SPOT_REPAIR_MISSING_THRESHOLD=1000"
+if "%V8_STOCK_SPOT_FORCE_LATEST%"=="" set "V8_STOCK_SPOT_FORCE_LATEST=1"
+set "V8_STOCK_DAILY_MODE=spot_repair"
+
+REM Skip Tushare sw_daily API due to severe rate limit (1 call/hour).
+REM Downstream industry metrics rely on cn_local_industry_proxy_daily instead,
+REM which is built from constituent stock prices (V8_SKIP_LOCAL_INDUSTRY_PROXY=0).
+set "SW_INDUSTRY_DAILY_ENABLED=0"
+
+REM Reset all derived skip flags for normal daily update.
+REM All derived builders must run (skip=0) because
+REM build_unified_alpha_score_daily.py's audit_source_data_coverage() requires
+REM ALL 6 REQUIRED_SOURCE_TABLES to have data covering the full trading range.
+REM Setting any of them to 1 would cause RANGE_NOT_COVERED errors and the
+REM alpha pipeline would fail with sys.exit(2).
+set "V8_SKIP_STOCK_FUNDAMENTAL_DAILY=0"
+set "V8_SKIP_STOCK_QUALITY_SCORE=0"
+set "V8_SKIP_INDUSTRY_CAPITAL_FLOW=0"
+set "V8_SKIP_GA_STOCK_ROLE_MAP=0"
+set "V8_SKIP_MAINLINE_STRENGTH=0"
+set "V8_SKIP_MAINLINE_RADAR=0"
+set "V8_SKIP_MARKET_PULSE=0"
+set "V8_SKIP_LOCAL_INDUSTRY_PROXY=0"
+set "V8_SKIP_MAINLINE_LIFECYCLE=0"
+set "V8_SKIP_UNIFIED_ALPHA=0"
+
+if "%V8_SKIP_EVENT_LOADER%"=="" set "V8_SKIP_EVENT_LOADER=1"
+REM Future-system default: skip legacy rotation snapshot refresh because it still
+REM depends on cn_board_member_map_d and legacy rotation snapshot tables.
+if "%V8_SKIP_ROTATION_SNAPSHOT%"=="" set "V8_SKIP_ROTATION_SNAPSHOT=1"
+
+set "V8_DAILY_INCLUDE_VALIDATIONS=0"
+set "V8_DAILY_INCLUDE_CROSSWALK_LATEST=0"
+if "%V8_ENABLE_CROSSWALK_LATEST%"=="" set "V8_ENABLE_CROSSWALK_LATEST=0"
+
+if "%V8_DAILY_TASKS%"=="" (
+    REM v8_stock_basic loads cn_stock_daily_basic and refreshes cn_stock_leader_score_daily VIEW,
+    REM which are required by derived foundation/mainline builders (build_ga_stock_role_map_daily,
+    REM build_cn_stock_mainline_strength_daily, etc.). Without it, those builders find no leader
+    REM score data for recent dates and silently skip, leaving derived tables empty.
+    set "V8_DAILY_TASKS=v8_daily_market_raw,v8_daily_reference,v8_stock_basic,v8_daily_audit,v8_daily_derived_foundation,v8_daily_derived_mainline,v8_daily_derived_alpha"
+)
+
+REM If V8_SKIP_STOCK_BASIC is set to 1, skip stock_basic task.
+REM This is useful when only unified_alpha needs to run and stock_basic
+REM (which loads cn_stock_daily_basic via Tushare) is not needed.
+if "%V8_SKIP_STOCK_BASIC%"=="" set "V8_SKIP_STOCK_BASIC=0"
+if "%V8_SKIP_STOCK_BASIC%"=="1" (
+    echo [DAILY_UPDATE] V8_SKIP_STOCK_BASIC=1, setting STOCK_BASIC_ENABLED=0
+    set "STOCK_BASIC_ENABLED=0"
+)
+
+for /f %%D in ('powershell -NoProfile -Command "(Get-Date).ToString('yyyy-MM-dd')"') do set "END_DATE=%%D"
+for /f %%D in ('powershell -NoProfile -Command "(Get-Date).AddDays(-%V8_DAILY_UPDATE_LOOKBACK_DAYS%).ToString('yyyy-MM-dd')"') do set "START_DATE=%%D"
+
+echo ============================================================
+echo [DAILY_UPDATE] Window %START_DATE% to %END_DATE%
+echo [DAILY_UPDATE] stock_mode=%V8_STOCK_DAILY_MODE%
+echo [DAILY_UPDATE] stock_repair_lookback=%V8_STOCK_SPOT_REPAIR_LOOKBACK_DAYS%
+echo [DAILY_UPDATE] missing_threshold=%V8_STOCK_SPOT_REPAIR_MISSING_THRESHOLD%
+echo [DAILY_UPDATE] tasks=%V8_DAILY_TASKS%
+echo [DAILY_UPDATE] skip_event=%V8_SKIP_EVENT_LOADER% skip_rotation=%V8_SKIP_ROTATION_SNAPSHOT% crosswalk_enabled=%V8_ENABLE_CROSSWALK_LATEST%
+echo [DAILY_UPDATE] skip_quality=%V8_SKIP_STOCK_QUALITY_SCORE% skip_role=%V8_SKIP_GA_STOCK_ROLE_MAP% skip_radar=%V8_SKIP_MAINLINE_RADAR% skip_proxy=%V8_SKIP_LOCAL_INDUSTRY_PROXY% skip_alpha=%V8_SKIP_UNIFIED_ALPHA%
+echo ============================================================
+
+REM ---- First attempt: normal daily update ----
+"%PYTHON_EXE%" "%SCRIPT_DIR%runner.py" --tasks "%V8_DAILY_TASKS%" --start-date "%START_DATE%" --end-date "%END_DATE%" --refresh
+
+set "RC=%ERRORLEVEL%"
+if "%RC%"=="0" (
+    echo [DAILY_UPDATE] completed successfully.
+    exit /b 0
+)
+
+echo [DAILY_UPDATE] First pass failed with exit code %RC%.
+echo [DAILY_UPDATE] Attempting auto-repair: re-run with expanded window to backfill missing derived data...
+
+REM ---- Second attempt: auto-repair with expanded window ----
+REM Use a shorter lookback (e.g. 30 days) for the repair pass to minimize runtime,
+REM while still covering the most recent missing data.
+set "V8_DAILY_UPDATE_LOOKBACK_DAYS=30"
+for /f %%D in ('powershell -NoProfile -Command "(Get-Date).AddDays(-%V8_DAILY_UPDATE_LOOKBACK_DAYS%).ToString('yyyy-MM-dd')"') do set "REPAIR_START=%%D"
+
+REM Force stock_basic to load a wider window during repair to ensure
+REM cn_stock_daily_basic and cn_stock_leader_score_daily VIEW have data
+REM for the entire repair range (otherwise default 7-day lookback may be insufficient).
+set "STOCK_BASIC_LOOKBACK_DAYS=%V8_DAILY_UPDATE_LOOKBACK_DAYS%"
+
+REM Override all V8_SKIP_* to 0 during repair so that all derived builders run
+REM and generate the missing source data required by build_unified_alpha_score_daily.py's
+REM audit_source_data_coverage(). Without this, the alpha pipeline would fail again
+REM with RANGE_NOT_COVERED errors.
+set "V8_SKIP_STOCK_FUNDAMENTAL_DAILY=0"
+set "V8_SKIP_STOCK_QUALITY_SCORE=0"
+set "V8_SKIP_INDUSTRY_CAPITAL_FLOW=0"
+set "V8_SKIP_GA_STOCK_ROLE_MAP=0"
+set "V8_SKIP_MAINLINE_STRENGTH=0"
+set "V8_SKIP_MAINLINE_RADAR=0"
+set "V8_SKIP_MARKET_PULSE=0"
+set "V8_SKIP_LOCAL_INDUSTRY_PROXY=0"
+set "V8_SKIP_MAINLINE_LIFECYCLE=0"
+set "V8_SKIP_UNIFIED_ALPHA=0"
+
+echo [DAILY_UPDATE] Repair window %REPAIR_START% to %END_DATE%
+echo [DAILY_UPDATE] Repair tasks=%V8_DAILY_TASKS%
+echo [DAILY_UPDATE] Repair stock_basic_lookback=%STOCK_BASIC_LOOKBACK_DAYS%
+echo [DAILY_UPDATE] Repair mode: all V8_SKIP_* overridden to 0 for full derived backfill (incl. proxy)
+
+"%PYTHON_EXE%" "%SCRIPT_DIR%runner.py" --tasks "%V8_DAILY_TASKS%" --start-date "%REPAIR_START%" --end-date "%END_DATE%" --refresh
+
+set "RC2=%ERRORLEVEL%"
+if not "%RC2%"=="0" (
+    echo [DAILY_UPDATE] Auto-repair failed with exit code %RC2%.
+    echo [DAILY_UPDATE] All attempts exhausted. Manual intervention required.
+    exit /b %RC2%
+)
+
+echo [DAILY_UPDATE] Auto-repair completed successfully.
+exit /b 0

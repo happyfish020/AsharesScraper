@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS `cn_stock_v8_to_v7_sw_map_latest` (
+    `asof_date` DATE NOT NULL,
+    `src` VARCHAR(16) NOT NULL,
+    `symbol` VARCHAR(16) NOT NULL,
+    `v8_local_industry_id` VARCHAR(32) NOT NULL,
+    `v8_local_industry_name` VARCHAR(128) DEFAULT NULL,
+    `v7_sw_l1_code` VARCHAR(32) DEFAULT NULL,
+    `v7_sw_l1_name` VARCHAR(128) DEFAULT NULL,
+    `mapping_type` VARCHAR(32) NOT NULL,
+    `manual_review_flag` TINYINT(1) NOT NULL DEFAULT 0,
+    `jaccard_score` DECIMAL(12, 6) NOT NULL DEFAULT 0.000000,
+    `coverage_vs_v8` DECIMAL(12, 6) NOT NULL DEFAULT 0.000000,
+    `coverage_vs_v7` DECIMAL(12, 6) NOT NULL DEFAULT 0.000000,
+    `decision_reason` VARCHAR(255) DEFAULT NULL,
+    `created_at` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`asof_date`, `src`, `symbol`, `v8_local_industry_id`),
+    KEY `idx_stock_v7_latest` (`src`, `v7_sw_l1_code`),
+    KEY `idx_stock_v8_latest` (`src`, `v8_local_industry_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

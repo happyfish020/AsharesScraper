@@ -53,6 +53,7 @@ Optional analytics views:
 
 Note:
 
+- Rotation procedures that compare `run_id`/`baseline_key` explicitly declare `CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci` to match rotation table columns and avoid MySQL 8 `utf8mb4_unicode_ci` vs `utf8mb4_0900_ai_ci` comparison errors. If you hit error 1267, re-apply steps 10-13 and the validation SPs below.
 - `cn_stock_leader_score_v1` and `cn_stock_leader_score_v2` are views
 - on the current local DB check (`2026-05-05`), `cn_stock_leader_score_v2` is still a `VIEW`, not a table
 
