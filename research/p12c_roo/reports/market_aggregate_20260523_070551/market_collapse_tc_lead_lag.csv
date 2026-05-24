@@ -1,0 +1,3 @@
+﻿trade_date,tc_mainlines,tc_ratio,danger_ratio,pre_5d_avg_danger,post_5d_avg_danger,signal_lead
+2026-01-09,25,16.67,82.67,81.61,81.33,LEAD
+2026-01-26,2,3.92,45.1,78.48,68.15,LAG

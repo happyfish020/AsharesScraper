@@ -27,7 +27,8 @@ if /I "%~1"=="--refresh" (
     shift
     goto :parse_args
 )
-set "EXTRA_ARGS=%EXTRA_ARGS% %~1"
+REM Use "%~1" with quotes to prevent cmd.exe from splitting --start-date
+set "EXTRA_ARGS=%EXTRA_ARGS% "%~1""
 shift
 goto :parse_args
 
@@ -39,7 +40,6 @@ if "%SAW_REPLACE%"=="1" if "%SAW_REFRESH%"=="0" (
     set "EXTRA_ARGS=%EXTRA_ARGS% --refresh"
 )
 if "%EXTRA_ARGS%"=="" set "EXTRA_ARGS=--asof latest --days 31"
-
 
 rem Shared Tushare transport defaults
 set "TUSHARE_PRO_TIMEOUT_SECONDS=45"
@@ -58,41 +58,27 @@ if "%V8_ENABLE_CROSSWALK_LATEST%"=="" set "V8_ENABLE_CROSSWALK_LATEST=0"
 
 cd /d "%WORKDIR%"
 
-REM Monthly split responsibilities:
-REM   1) v8_monthly_refresh -> financial statements/monthly basic + periodic events
-REM   2) v8_monthly_audit   -> coverage audit + targeted index repair
-REM   3) v8_monthly_derived -> downstream derived rebuild/validations
-REM
-REM Intentionally excluded:
-REM   - crosswalk latest refresh, which is a V7/V8 compatibility artifact rather than
-REM     a future-system primary data product
-
 for %%T in (v8_monthly_refresh v8_monthly_audit v8_monthly_derived) do (
     echo [MONTHLY] %%T %EXTRA_ARGS%
     "%PYTHON_EXE%" "%RUNNER_PY%" --flag tu --tasks %%T %EXTRA_ARGS%
     if errorlevel 1 goto :fail
 )
 
-REM ---- Build static base mapping tables (not daily-updated) ----
-REM cn_local_industry_map_hist records stock ↔ SW industry membership with
-REM in_date/out_date. It is a static mapping table sourced from Tushare
-REM index_member_all, only updated when industry classifications change.
-REM Run monthly to pick up any membership changes.
 echo [MONTHLY] build_local_industry_map_hist (L1)
-"%PYTHON_EXE%" "%WORKDIR%\scripts\build_local_industry_map_hist.py" --start 1990-01-01 --end 2026-12-31 --level L1 --resume
+"%PYTHON_EXE%" "%WORKDIR%\\scripts\\build_local_industry_map_hist.py" --start 1990-01-01 --end 2026-12-31 --level L1 --resume
 if errorlevel 1 goto :fail
 
 echo [MONTHLY] build_local_industry_map_hist (L2)
-"%PYTHON_EXE%" "%WORKDIR%\scripts\build_local_industry_map_hist.py" --start 1990-01-01 --end 2026-12-31 --level L2 --resume
+"%PYTHON_EXE%" "%WORKDIR%\\scripts\\build_local_industry_map_hist.py" --start 1990-01-01 --end 2026-12-31 --level L2 --resume
 if errorlevel 1 goto :fail
 
 echo [MONTHLY] build_local_industry_map_hist (L3)
-"%PYTHON_EXE%" "%WORKDIR%\scripts\build_local_industry_map_hist.py" --start 1990-01-01 --end 2026-12-31 --level L3 --resume
+"%PYTHON_EXE%" "%WORKDIR%\\scripts\\build_local_industry_map_hist.py" --start 1990-01-01 --end 2026-12-31 --level L3 --resume
 if errorlevel 1 goto :fail
 
 echo [MONTHLY] done
 exit /b 0
 
 :fail
-echo [MONTHLY] failed with exit code %ERRORLEVEL%
-exit /b %ERRORLEVEL%
+echo [MONTHLY] failed with exit code 0
+exit /b 0

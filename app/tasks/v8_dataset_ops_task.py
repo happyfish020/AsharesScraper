@@ -600,11 +600,16 @@ class _V8OpsMixin:
         # which is a REQUIRED source table for build_mainline_lifecycle_daily.py.
         # It must run before the lifecycle builder to ensure member_count data
         # is available for the industry membership filter.
+        #
+        # NOTE: build_local_industry_proxy_daily.py reads DB settings from the
+        # shared project config/environment (build_engine() in app/settings.py),
+        # NOT from CLI args. Do NOT pass db_args here, otherwise the script
+        # fails with "unrecognized arguments: --db-host ...".
         if not skip_local_industry_proxy:
             self._run_optional_python_script(
                 ctx,
                 "scripts/build_local_industry_proxy_daily.py",
-                ["--start", start_iso, "--end", end_iso, "--chunk-days", "5"] + db_args,
+                ["--start", start_iso, "--end", end_iso, "--chunk-days", "5"],
             )
         else:
             ctx.log.info("[V8] V8_SKIP_LOCAL_INDUSTRY_PROXY=1; skipped build_local_industry_proxy_daily.py")
@@ -685,6 +690,11 @@ class _V8OpsMixin:
         self._run_optional_leader_recall(ctx, start_date, end_date)
 
     def _run_derived_chain(self, ctx, start_date: str, end_date: str, *, include_validations: bool, include_crosswalk: bool) -> None:
+        """Legacy: run full derived chain (all sub-chains).
+
+        Kept for backward compatibility; new code should call
+        _run_daily_derived_chain() or _run_monthly_derived_chain() instead.
+        """
         self._run_derived_foundation_chain(ctx, start_date, end_date)
         self._run_derived_mainline_chain(ctx, start_date, end_date, include_validations=include_validations)
         self._run_derived_alpha_chain(
@@ -694,6 +704,91 @@ class _V8OpsMixin:
             include_validations=include_validations,
             include_crosswalk=include_crosswalk,
         )
+
+    def _run_daily_derived_chain(self, ctx, start_date: str, end_date: str, *, include_validations: bool, include_crosswalk: bool) -> None:
+        """Daily derived chain: market, rotation, mainline, alpha.
+
+        Owned by V8DailyOpsTask. Covers:
+          - mainline strength, radar, market pulse (two passes)
+          - local industry proxy, mainline lifecycle
+          - industry capital flow, stock role map
+          - unified alpha score
+        """
+        self._run_derived_mainline_chain(ctx, start_date, end_date, include_validations=include_validations)
+        start_iso = _to_iso_date(start_date)
+        end_iso = _to_iso_date(end_date)
+        db_args = self._db_cli_args(ctx)
+        chunk_small = str(_env_int("V8_DERIVED_CHUNK_MONTHS_SMALL", 1))
+        chunk_medium = str(_env_int("V8_DERIVED_CHUNK_MONTHS_MEDIUM", 3))
+        if not _env_flag("V8_SKIP_INDUSTRY_CAPITAL_FLOW", False):
+            self._run_optional_python_script(
+                ctx,
+                "scripts/build_industry_capital_flow_daily.py",
+                ["--start", start_iso, "--end", end_iso, "--replace", "--chunk-months", chunk_small] + db_args,
+            )
+        else:
+            ctx.log.info("[V8] V8_SKIP_INDUSTRY_CAPITAL_FLOW=1; skipped build_industry_capital_flow_daily.py")
+        if not _env_flag("V8_SKIP_GA_STOCK_ROLE_MAP", False):
+            self._run_optional_python_script(
+                ctx,
+                "scripts/build_ga_stock_role_map_daily.py",
+                ["--start", start_iso, "--end", end_iso, "--replace", "--chunk-months", chunk_medium] + db_args,
+            )
+        else:
+            ctx.log.info("[V8] V8_SKIP_GA_STOCK_ROLE_MAP=1; skipped build_ga_stock_role_map_daily.py")
+        self._run_derived_alpha_chain(
+            ctx,
+            start_date,
+            end_date,
+            include_validations=include_validations,
+            include_crosswalk=include_crosswalk,
+        )
+
+    def _run_monthly_derived_chain(self, ctx, start_date: str, end_date: str, *, include_validations: bool, include_crosswalk: bool) -> None:
+        """Monthly derived chain: financial statements & quality factors.
+
+        Owned by V8MonthlyOpsTask / V8MonthlyDerivedTask. Covers:
+          - stock fundamental daily (financial snapshot)
+          - stock quality score
+          - unified alpha score (optional, disabled by default)
+
+        NOTE: Monthly pipeline does NOT backfill daily-frequency data
+        (mainline/rotation/alpha). Those are owned by the Daily pipeline.
+        Unified alpha score refresh here is optional (V8_MONTHLY_INCLUDE_ALPHA=1).
+        """
+        start_iso = _to_iso_date(start_date)
+        end_iso = _to_iso_date(end_date)
+        db_args = self._db_cli_args(ctx)
+        chunk_medium = str(_env_int("V8_DERIVED_CHUNK_MONTHS_MEDIUM", 3))
+        if not _env_flag("V8_SKIP_STOCK_FUNDAMENTAL_DAILY", False):
+            self._run_python_script(
+                ctx,
+                "scripts/build_stock_fundamental_daily.py",
+                ["--start", start_iso, "--end", end_iso, "--replace"],
+            )
+        else:
+            ctx.log.info("[V8] V8_SKIP_STOCK_FUNDAMENTAL_DAILY=1; skipped build_stock_fundamental_daily.py")
+        if not _env_flag("V8_SKIP_STOCK_QUALITY_SCORE", False):
+            self._run_optional_python_script(
+                ctx,
+                "scripts/build_stock_quality_score_daily.py",
+                ["--start", start_iso, "--end", end_iso, "--replace", "--chunk-months", chunk_medium] + db_args,
+            )
+        else:
+            ctx.log.info("[V8] V8_SKIP_STOCK_QUALITY_SCORE=1; skipped build_stock_quality_score_daily.py")
+        # Monthly pipeline does NOT run _run_latest_snap() — that is a daily-frequency
+        # leader snapshot owned by the Weekly pipeline (v8_weekly_finalize).
+        # Unified alpha score is optional here; daily pipeline handles it by default.
+        if _env_flag("V8_MONTHLY_INCLUDE_ALPHA", False):
+            self._run_derived_alpha_chain(
+                ctx,
+                start_date,
+                end_date,
+                include_validations=include_validations,
+                include_crosswalk=include_crosswalk,
+            )
+        else:
+            ctx.log.info("[V8] V8_MONTHLY_INCLUDE_ALPHA=0; skipped unified alpha score (daily pipeline handles it)")
 
     def _repair_index_gaps_from_audit(self, ctx, audit_frames: dict[str, pd.DataFrame]) -> int:
         repair_dates_by_index: dict[str, set] = {}
@@ -1248,7 +1343,7 @@ class V8MonthlyDerivedTask(_V8OpsMixin):
             include_validations,
             include_crosswalk,
         )
-        self._run_derived_chain(
+        self._run_monthly_derived_chain(
             ctx,
             cfg.start_date,
             cfg.end_date,
@@ -1281,7 +1376,7 @@ class V8DailyOpsTask(_V8OpsMixin):
             self._repair_index_gaps_from_audit(ctx, audit_frames)
             audit_frames = self._run_coverage_audit_for_window(ctx, audit_start, audit_end)
             self._log_audit_summary(ctx, audit_frames, prefix="daily-post-index-repair")
-            self._run_derived_chain(
+            self._run_daily_derived_chain(
                 ctx,
                 cfg.start_date,
                 cfg.end_date,
@@ -1314,7 +1409,7 @@ class V8DailyOpsTask(_V8OpsMixin):
             self._repair_index_gaps_from_audit(ctx, audit_frames)
             audit_frames = self._run_coverage_audit_for_window(ctx, repair_start, cfg.end_date)
             self._log_audit_summary(ctx, audit_frames, prefix="daily-second-pass-post-index-repair")
-            self._run_derived_chain(
+            self._run_daily_derived_chain(
                 ctx,
                 repair_start,
                 cfg.end_date,
@@ -1425,7 +1520,7 @@ class V8MonthlyOpsTask(_V8OpsMixin):
             audit_frames = self._run_coverage_audit_for_window(ctx, audit_start, audit_end)
             self._log_audit_summary(ctx, audit_frames, prefix="monthly-post-index-repair")
             if _env_flag("V8_MONTHLY_INCLUDE_DERIVED_REFRESH", True):
-                self._run_derived_chain(
+                self._run_monthly_derived_chain(
                     ctx,
                     cfg.start_date,
                     cfg.end_date,
@@ -1465,7 +1560,7 @@ class V8MonthlyOpsTask(_V8OpsMixin):
             audit_frames = self._run_coverage_audit_for_window(ctx, repair_start, cfg.end_date)
             self._log_audit_summary(ctx, audit_frames, prefix="monthly-second-pass-post-index-repair")
             if _env_flag("V8_MONTHLY_INCLUDE_DERIVED_REFRESH", True):
-                self._run_derived_chain(
+                self._run_monthly_derived_chain(
                     ctx,
                     repair_start,
                     cfg.end_date,

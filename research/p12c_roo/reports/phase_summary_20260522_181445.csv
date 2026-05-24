@@ -1,0 +1,7 @@
+﻿phase,theme_count,themes_with_tc,total_rows,stability_issues,danger_dates,normal_dates,danger_ratio,breakout_data_available,persistence_windows,multi_day_windows,candidate_mainlines,repeat_collapse,total_mainlines,suspected_noise,noise_ratio,status,verdict,pass_count,total_phases,reason
+cross_mainline,1.0,1.0,62314.0,1.0,,,,,,,,,,,,,,,,
+danger_zone,,,,,80.0,80.0,50.0,False,,,,,,,,,,,,
+persistence,,,,,,,,,2.0,0.0,336.0,0.0,,,,,,,,
+false_positive,,,,,,,,,,,,,336.0,0.0,0.0,,,,,
+philosophy,,,,,,,,,,,,,,,,PASS,,,,
+final_decision,,,,,,,,,,,,,,,,,STOP_P12C_LINE,2.0,5.0,Insufficient evidence (2/5 phases passed). Signal quality insufficient.

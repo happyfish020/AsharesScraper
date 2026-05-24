@@ -27,7 +27,9 @@ if /I "%~1"=="--refresh" (
     shift
     goto :parse_args
 )
-set "EXTRA_ARGS=%EXTRA_ARGS% %~1"
+REM Use "%~1" with quotes to prevent cmd.exe from splitting --start-date into
+REM separate tokens (the hyphen is treated as a parameter delimiter by cmd.exe).
+set "EXTRA_ARGS=%EXTRA_ARGS% "%~1""
 shift
 goto :parse_args
 

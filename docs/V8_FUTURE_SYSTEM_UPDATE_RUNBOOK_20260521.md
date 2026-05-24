@@ -71,14 +71,19 @@ Entrypoint:
 daily_spot_update.bat
 ```
 
+**职责**：高频原始数据、Rotation/Mainline/Alpha
+
 Current default behavior:
 
-- refresh market raw tables
-- refresh `sw_industry`
+- refresh market raw tables（`StockLoaderTask`、`IndexLoaderTask`）
+- refresh `sw_industry`（`SwIndustryDailyTask`）
 - skip daily event loader by default
 - skip rotation snapshot by default
-- run derived foundation / mainline / alpha chain
-- **mainline chain now includes `build_local_industry_proxy_daily.py`** (runs after market_pulse, before lifecycle)
+- run **daily derived chain**（`_run_daily_derived_chain`）：
+  - **Mainline Chain**：mainline strength、radar、market pulse、local industry proxy、lifecycle
+  - **Industry Capital Flow**：`build_industry_capital_flow_daily.py`
+  - **Stock Role Map**：`build_ga_stock_role_map_daily.py`
+  - **Alpha Chain**：`build_unified_alpha_score_daily.py`
 - keep `crosswalk_latest` disabled
 
 Default legacy exclusions:
@@ -91,6 +96,16 @@ Reason:
 
 - `SectorRotationSnapshotTask` still depends on `cn_board_member_map_d` and legacy
   rotation tables, so it is not part of the future-system default daily refresh.
+
+### Pipeline 职责划分
+
+| Pipeline | 重点 | 原始数据 | 衍生链 |
+|----------|------|---------|--------|
+| **Daily** | 高频原始数据、Rotation/Mainline/Alpha | Stock/Index/SW Industry | Mainline Chain + Industry Capital Flow + Stock Role Map + Alpha Chain |
+| **Weekly** | 低频 Reference/Event、Board/Event/Mapping | Stock Basic / Event Periodic / Board Membership | 不调衍生链，仅做 snap + crosswalk |
+| **Monthly** | 财务报表与质量因子 | Stock Fundamental Monthly / Event Periodic | Fundamental Daily + Quality Score（Alpha Chain 可选，默认关闭） |
+
+> ⚠️ **核心原则**：Monthly pipeline **不补任何日频数据**。日频数据（行情、轮动、主线、Alpha）的回补统一由 `daily.bat` 负责。Monthly 只负责低频财务数据刷新和基于财务数据的质量评分。
 
 #### Mainline Chain Execution Order
 
@@ -146,6 +161,35 @@ Reason:
   suitable once those tables are no longer part of the routine future-system
   refresh contract.
 
+#### Weekly 参数说明
+
+`weekly.bat` 透传所有参数给 `runner.py`，以下两个参数容易混淆：
+
+| 参数 | 作用范围 | 格式 | 用途 |
+|------|---------|------|------|
+| `--start-date` / `--end-date` | 所有 task（`v8_weekly_*`、`v8_daily_*`、`v8_backfill` 等） | `YYYYMMDD` 或 `YYYY-MM-DD` | 显式指定日期窗口，覆盖 `--days` 的自动计算 |
+| `--history-start` / `--history-end` | **仅限** `his_stocks` task | `YYYYMMDD` 或 `YYYY-MM`（支持月份简写） | 指定 `HisStocksLoaderTask` 的历史数据拉取起始点 |
+
+**关键区别**：
+
+- `--start-date` 写入 `cfg.start_date` / `cfg.end_date`，被所有 task 共用（[`cli.py` 第 194-200 行](../../app/cli.py:194)）
+- `--history-start` 写入 `cfg.his_start_date` / `cfg.his_end_date`，**仅当 `his_stocks` 在 task 列表中时生效**（[`cli.py` 第 209-225 行](../../app/cli.py:209)），同时也会覆盖 `cfg.start_date` / `cfg.end_date`
+
+**常见场景**：
+
+- **补跑 V8 周度数据**（如从 2026-01-01 补到今天）：使用 `--start-date`
+  ```bat
+  weekly.bat --start-date 20260101 --end-date latest
+  ```
+  这会覆盖 `weekly.bat` 默认的 `--asof latest --days 7`（最近 7 天），改为从 2026-01-01 跑到最新交易日。
+
+- **补历史行情数据**（原始日线行情回填）：使用 `--history-start`，且 task 必须为 `his_stocks`
+  ```bat
+  python runner.py --tasks his_stocks --history-start 20260101 --history-end latest
+  ```
+
+> ⚠️ 注意：`--history-start` 对 `v8_weekly` 等非 `his_stocks` task **完全无效**。如果你跑 `weekly.bat` 时传了 `--history-start`，该参数会被忽略。
+
 ### Monthly
 
 Entrypoint:
@@ -153,6 +197,61 @@ Entrypoint:
 ```bat
 monthly.bat
 ```
+
+Monthly Pipeline 总体结构：
+
+```
+v8_monthly_refresh
+        ↓
+v8_monthly_audit
+        ↓
+v8_monthly_derived
+        ↓
+build_local_industry_map_hist (L1/L2/L3)
+```
+
+#### 1. `v8_monthly_refresh` — 月度基础财务数据刷新
+
+主要负责更新低频财务和估值数据：
+
+- **财务报表**：`cn_stock_income`、`cn_stock_balancesheet`、`cn_stock_cashflow`、`cn_stock_fina_indicator`
+- **月度估值**：`cn_stock_monthly_basic`
+- **财务质量参数**：`cn_fundamental_quality_param_t`
+- **Periodic 事件**：`EventLoaderPeriodic`（分红、预告等）
+
+#### 2. `v8_monthly_audit` — 财务数据完整性审计
+
+检查内容：
+- 最近报告期覆盖率
+- 股票覆盖率
+- 空值比例 / 异常值检查
+- 行数阈值
+
+输出：
+- `cn_ga_data_readiness_daily`
+- `monthly_financial_audit.csv`
+
+#### 3. `v8_monthly_derived` — 财务报表与质量因子衍生链
+
+`V8MonthlyDerivedTask` 通过 `_run_monthly_derived_chain()` 执行，**仅刷新财务报表和质量因子**，不涉及行情/轮动/主线等日频数据。
+
+| 脚本 | 构建表 | 说明 |
+|------|--------|------|
+| `build_stock_fundamental_daily.py` | `cn_stock_fundamental_daily` | 每日基本面快照（ROE/ROIC/毛利率/净利增长/现金流/杠杆） |
+| `build_stock_quality_score_daily.py` | `cn_stock_quality_score_daily` | 质量评分 |
+| `build_unified_alpha_score_daily.py` | `cn_unified_alpha_score_daily` | 统一 Alpha 评分（**可选**，`V8_MONTHLY_INCLUDE_ALPHA=1` 时启用，默认关闭） |
+| `build_v7_v8_crosswalk_latest.py` | `cn_v7_v8_industry_crosswalk` | V7↔V8 行业映射（`V8_MONTHLY_INCLUDE_CROSSWALK_LATEST=1` 时启用） |
+| `validate_unified_alpha_leader_recall.py` | — | Leader 回测验证（`V8_ENABLE_LEADER_RECALL_VALIDATION=1` 时启用） |
+
+> ⚠️ **核心原则**：Monthly pipeline **不补任何日频数据**。日频数据（行情、轮动、主线、Alpha）的回补统一由 `daily.bat` 负责。
+>
+> - `_run_latest_snap()`（`cn_stock_leader_sw_l1_latest_snap`）由 Weekly pipeline 的 `v8_weekly_finalize` 负责
+> - `_run_derived_alpha_chain()`（`build_unified_alpha_score_daily.py`）默认由 Daily pipeline 负责，Monthly 仅在 `V8_MONTHLY_INCLUDE_ALPHA=1` 时触发
+> - Mainline chain（主线强度/雷达/市场脉搏/生命周期）、industry_capital_flow、ga_stock_role_map 等日频衍生**完全不在 Monthly 范围内**
+
+#### 4. `build_local_industry_map_hist` — 静态行业映射表
+
+在 v8 任务链完成后运行，刷新 `cn_local_industry_map_hist`（L1/L2/L3）。
 
 Current default behavior:
 
