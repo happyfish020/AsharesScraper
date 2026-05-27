@@ -3094,3 +3094,72 @@ python scripts/build_mainline_lifecycle_daily.py   --start 2026-05-21  --db-host
   
   ：cn_local_industry_map_hist 作为基础表 不放在日更新job 中
   
+  
+D:\LHJ\PythonWS\MarketScraper\AsharesScraperV2\daily_spot_update.bat。
+改动是：日更主流程成功后、以及 auto-repair 成功后，都会追加执行一次最新交易日的大市/板块信号守卫：
+daily_spot_update.bat
+新增脚本：
+scripts/ensure_daily_market_mainline_signal_states.py
+它会找最新股票/指数共同交易日，然后检查并补齐这些表：
+text
+
+
+
+cn_local_industry_proxy_daily
+cn_ga_mainline_radar_daily
+cn_ga_market_pulse_daily
+cn_mainline_lifecycle_daily
+
+同时会尝试补中间依赖：
+text
+
+
+
+cn_ga_stock_role_map_daily
+cn_stock_mainline_strength_daily
+
+但这两个如果当天仍缺，不再阻塞大市/板块信号。也就是说：即使 role_map 还没补出来，大市和板块状态也会用 cn_local_industry_proxy_daily + index 兜底生成，不会再让报告停在没信号。
+已验收当前最新交易日 2026-05-22：
+text
+
+
+
+cn_local_industry_proxy_daily      31 rows
+cn_ga_mainline_radar_daily         31 rows
+cn_ga_market_pulse_daily            1 row
+cn_mainline_lifecycle_daily        31 rows
+
+当前大市信号：
+text
+
+
+
+market_state = TREND_STRONG
+market_phase = TREND_STRONG
+risk_flag = LOW
+market_score = 65.8662
+breadth_up_ratio = 0.7201
+
+我也跑了：
+powershell
+
+
+
+python -m py_compile scripts\ensure_daily_market_mainline_signal_states.py
+python scripts\ensure_daily_market_mainline_signal_states.py
+
+都通过。完整 daily_spot_update.bat 没有重新全量跑，避免触发整套抓取和派生链路长时间运行；这次验证的是新增的补洞模块本身。  
+
+
+
+===
+V7 
+@echo off
+setlocal
+cd /d "%~dp0"
+
+python scripts\ensure_daily_market_mainline_signals.py %*
+if errorlevel 1 exit /b %errorlevel%
+
+python scripts\run_p61_p64_daily_human_report.py --skip-live-observation
+if errorlevel 1 exit /b %errorlevel%

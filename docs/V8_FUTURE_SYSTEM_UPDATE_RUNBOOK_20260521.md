@@ -51,6 +51,9 @@ Notes:
   valid compatibility artifacts, but they are no longer refreshed by default in
   routine future-system ops.
 - `cn_board_*` tables are kept for legacy/research/recovery workflows only.
+- For current V8 database semantics, also see:
+  - [V8_LOCAL_INDUSTRY_SEMANTICS_CONTRACT_20260525.md](./V8_LOCAL_INDUSTRY_SEMANTICS_CONTRACT_20260525.md)
+  - [V8_CROSSWALK_SCOPE_GUIDE_20260525.md](./V8_CROSSWALK_SCOPE_GUIDE_20260525.md)
 
 ### Static Base Tables (refreshed monthly, not daily)
 
@@ -60,6 +63,17 @@ They are refreshed monthly via `monthly.bat` rather than in the daily pipeline:
 - `cn_local_industry_map_hist` — stock ↔ SW industry membership with in_date/out_date.
   Sourced from Tushare `index_member_all`. Only updated when industry classifications
   change (e.g., new stocks added to an industry).
+
+Current V8 semantic interpretation:
+
+- `cn_local_industry_map_hist.industry_level = 'L3'` = `LOCAL_FINE`, the
+  fine-grained V8 production membership layer
+- `cn_local_industry_proxy_daily.industry_level = 'L1'` = legacy physical label
+  for the same `LOCAL_FINE` production layer
+- `SW_L1` keeps its literal meaning and refers to the official Shenwan level-1
+  comparison layer
+- `scripts/build_local_industry_map_hist.py` defaults to `--level L3`
+  for the V8 production path
 
 ## Current Batch Contract
 
@@ -72,6 +86,11 @@ daily_spot_update.bat
 ```
 
 **职责**：高频原始数据、Rotation/Mainline/Alpha
+
+For the current V8 production contract:
+
+- `L3` is the required `LOCAL_FINE` membership layer
+- `L1/L2` are optional compatibility/reference refreshes
 
 Current default behavior:
 
@@ -260,7 +279,7 @@ Current default behavior:
 - run monthly market audit
 - run derived refresh chain
 - keep `crosswalk_latest` disabled
-- **build `cn_local_industry_map_hist`** (L1/L2/L3, after v8 tasks)
+- **build `cn_local_industry_map_hist`** (`L3` required for V8 LOCAL_FINE; `L1/L2` optional, after v8 tasks)
 
 Default legacy exclusions:
 
@@ -272,13 +291,26 @@ Default legacy exclusions:
 After the v8 task chain completes, `monthly.bat` runs:
 
 ```bat
-python scripts/build_local_industry_map_hist.py --start 1990-01-01 --end 2026-12-31 --level L1 --resume
-python scripts/build_local_industry_map_hist.py --start 1990-01-01 --end 2026-12-31 --level L2 --resume
 python scripts/build_local_industry_map_hist.py --start 1990-01-01 --end 2026-12-31 --level L3 --resume
 ```
 
 These refresh the stock ↔ SW industry membership mapping from Tushare
 `index_member_all`. `--resume` skips already-completed industry chunks.
+
+V8 semantic note:
+
+- the required production refresh above is `--level L3`
+- this corresponds to the `LOCAL_FINE` membership layer used by the V8 mainline
+  production path
+- `--level L1` and `--level L2` are optional compatibility/reference refreshes,
+  not required for the core V8 daily proxy chain
+
+Optional compatibility/reference refreshes:
+
+```bat
+python scripts/build_local_industry_map_hist.py --start 1990-01-01 --end 2026-12-31 --level L1 --resume
+python scripts/build_local_industry_map_hist.py --start 1990-01-01 --end 2026-12-31 --level L2 --resume
+```
 
 ## Data Dependency & Refresh Strategy
 
@@ -340,6 +372,40 @@ set V8_SKIP_LOCAL_INDUSTRY_PROXY=1
 daily_spot_update.bat
 ```
 
+Signal-guard note:
+
+- `daily_spot_update.bat` now also refreshes a recent `LOCAL_FINE`
+  `cn_local_industry_map_hist --level L3` window by default before signal guard
+- `daily_spot_update.bat` now also refreshes `cn_board_member_map_d` via
+  `build_board_map_by_year.py` before signal guard, because
+  `sp_materialize_leader_score` (called by `v8_stock_basic`) depends on
+  `cn_board_member_map_d` having `INDUSTRY` records for the target dates.
+  Without this, leader scores silently skip recent dates, cascading into empty
+  `cn_ga_stock_role_map_daily` / `cn_stock_mainline_strength_daily` /
+  `cn_ga_mainline_radar_daily` / `cn_ga_market_pulse_daily` for those dates.
+- `daily_spot_update.bat` re-runs `v8_stock_basic` (to refresh leader scores)
+  for the full `START_DATE..END_DATE` window before signal guard.
+- `daily_spot_update.bat` re-runs `v8_daily_derived_foundation` with
+  `V8_SKIP_STOCK_FUNDAMENTAL_DAILY=1`, `V8_SKIP_STOCK_QUALITY_SCORE=1`,
+  `V8_SKIP_INDUSTRY_CAPITAL_FLOW=1` — only `build_ga_stock_role_map_daily.py`
+  (role_map) runs, because it is the only foundation builder affected by board
+  map refresh. This eliminates ~5 minutes of redundant computation
+  (stock_fundamental_daily, stock_quality_score, industry_capital_flow were
+  already built in the first pass).
+- `daily_spot_update.bat` re-runs `v8_daily_derived_mainline` (to fill mainline
+  tables) for the full `START_DATE..END_DATE` window before signal guard.
+- `daily_spot_update.bat` ends by running
+  `scripts/ensure_daily_market_mainline_signal_states.py`
+- this guard uses the latest **buildable** mainline-signal date, not just the
+  latest raw market date
+- it is bounded by raw stock/index coverage, `cn_stock_daily_basic`, and the
+  current `LOCAL_FINE` map horizon from
+  `cn_local_industry_map_hist.industry_level = 'L3'`
+- `_latest_signal_trade_date()` uses `MAX(COALESCE(out_date, in_date))` instead
+  of `MAX(out_date)` for the LOCAL_FINE horizon, because `out_date` is the date
+  a stock *leaves* an industry — stocks still in their industry have `NULL`
+  out_date, which would incorrectly pull the max down.
+
 If you need to restore legacy board refresh explicitly, do not use the default
 `weekly.bat`. Run the board-specific tasks directly.
 
@@ -348,9 +414,14 @@ If you need to restore legacy board refresh explicitly, do not use the default
 ### cn_local_industry_map_hist (static mapping, monthly refresh)
 
 ```bat
+python scripts/build_local_industry_map_hist.py --start 1990-01-01 --end 2026-12-31 --level L3 --resume
+```
+
+Optional compatibility/reference refreshes:
+
+```bat
 python scripts/build_local_industry_map_hist.py --start 1990-01-01 --end 2026-12-31 --level L1 --resume
 python scripts/build_local_industry_map_hist.py --start 1990-01-01 --end 2026-12-31 --level L2 --resume
-python scripts/build_local_industry_map_hist.py --start 1990-01-01 --end 2026-12-31 --level L3 --resume
 ```
 
 ### cn_local_industry_proxy_daily (daily derived, standalone backfill)
@@ -362,5 +433,7 @@ python scripts/build_local_industry_proxy_daily.py --start 2026-05-01 --end 2026
 ## Related Docs
 
 - [V8_DATASET_RUNBOOK_20260515.md](./V8_DATASET_RUNBOOK_20260515.md)
+- [V8_LOCAL_INDUSTRY_SEMANTICS_CONTRACT_20260525.md](./V8_LOCAL_INDUSTRY_SEMANTICS_CONTRACT_20260525.md)
+- [V8_CROSSWALK_SCOPE_GUIDE_20260525.md](./V8_CROSSWALK_SCOPE_GUIDE_20260525.md)
 - [BK_TS_SW_ACTIVE_DEPENDENCY_AUDIT_20260521.md](./BK_TS_SW_ACTIVE_DEPENDENCY_AUDIT_20260521.md)
 - [board_membership_refresh_playbook.md](./board_membership_refresh_playbook.md)

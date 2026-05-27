@@ -25,6 +25,11 @@ The main rule is:
 - do **not** default to full-table destructive rebuilds
 - use year-split execution for long windows
 
+For current V8 database semantics, also see:
+
+- [V8_LOCAL_INDUSTRY_SEMANTICS_CONTRACT_20260525.md](./V8_LOCAL_INDUSTRY_SEMANTICS_CONTRACT_20260525.md)
+- [V8_CROSSWALK_SCOPE_GUIDE_20260525.md](./V8_CROSSWALK_SCOPE_GUIDE_20260525.md)
+
 ## What The Old Split Runbook Misses
 
 `v8_backfill` covers the raw market / raw financial / derived mainline chain, but it does **not** fully cover the V8 compatibility mapping chain.
@@ -261,13 +266,20 @@ Use the script that explicitly merges board-map history and Tushare membership h
 python scripts/build_local_industry_map_hist.py ^
   --start 2010-01-01 ^
   --end 2016-12-31 ^
-  --level L1 ^
+  --level L3 ^
   --src SW2021 ^
   --resume ^
   --workers 4
 ```
 
-This is the builder that matters for V8 local `85xxxx.SI` history.
+This is the builder that matters for the V8 `LOCAL_FINE` membership layer.
+
+Current V8 semantic interpretation:
+
+- `cn_local_industry_map_hist.industry_level = 'L3'` = `LOCAL_FINE`
+- `cn_local_industry_proxy_daily.industry_level = 'L1'` = legacy physical label
+  for the same `LOCAL_FINE` production layer
+- `SW_L1` remains the official Shenwan level-1 comparison layer
 
 Do **not** treat `build_sw_industry_member_hist.py` as a substitute for this step.
 
@@ -287,12 +299,15 @@ This builds:
 
 ### 3.5 V7/V8 crosswalk history
 
+Default compatibility-scope run:
+
 ```powershell
 python scripts/build_v7_v8_industry_crosswalk.py ^
   --start 2010-01-01 ^
   --end 2016-12-31 ^
   --replace ^
   --srcs SW2021 SW2014 ^
+  --v8-local-scope compat ^
   --source-mode db ^
   --output-dir reports/analysis/sw_v7_v8_crosswalk_2010_2016
 ```
@@ -300,6 +315,25 @@ python scripts/build_v7_v8_industry_crosswalk.py ^
 This builds:
 
 - `cn_v7_v8_industry_crosswalk`
+
+Optional full-universe analysis run:
+
+```powershell
+python scripts/build_v7_v8_industry_crosswalk.py ^
+  --start 2010-01-01 ^
+  --end 2016-12-31 ^
+  --srcs SW2021 SW2014 ^
+  --v8-local-scope full ^
+  --source-mode db ^
+  --output-dir reports/analysis/sw_v7_v8_crosswalk_2010_2016_full
+```
+
+Notes:
+
+- `compat` = legacy bridge subset (`85%.SI`)
+- `full` = all `LOCAL_FINE` rows from `cn_local_industry_map_hist.industry_level = 'L3'`
+- `full` is report-only by default and does not write into
+  `cn_v7_v8_industry_crosswalk` unless `--allow-full-db-write` is explicitly set
 
 ## Phase 4: Downstream Derived History
 
@@ -366,6 +400,9 @@ python scripts/build_v7_v8_crosswalk_latest.py ^
   --replace ^
   --output-dir reports/analysis/v7_v8_crosswalk_latest
 ```
+
+This remains a compatibility-layer latest snapshot, not the definition of the
+full V8 `LOCAL_FINE` production universe.
 
 ### 5.2 Latest stock-level V8-to-V7 mapping snapshot
 

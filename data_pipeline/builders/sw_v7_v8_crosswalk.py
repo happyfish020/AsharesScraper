@@ -15,6 +15,9 @@ from data_pipeline.common.logging_utils import build_logger
 from data_pipeline.tushare.client import TushareClient, resolve_tushare_token
 
 
+# Compatibility filter used by the current V7/V8 crosswalk builder.
+# This builder is not the V8 production source of truth; it only maps the
+# subset of LOCAL_FINE industries that participate in the legacy crosswalk.
 V8_LOCAL_PATTERN = "85%.SI"
 BENCHMARK_INDEX_CODES = ("sh000300", "sh000001", "sz399001")
 
@@ -31,13 +34,36 @@ class SwIndustryInfo:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Build V7/V8 industry crosswalk from local industry memberships and Tushare SW memberships."
+        description=(
+            "Build V7/V8 compatibility crosswalk from the V8 LOCAL_FINE local "
+            "industry layer and Tushare SW L1 memberships."
+        )
     )
     add_shared_args(parser, default_start="2023-01-01")
     parser.add_argument("--output-dir", default="reports/analysis/sw_v7_v8_crosswalk", help="Output directory root")
     parser.add_argument("--srcs", nargs="+", default=["SW2021", "SW2014"], help="Tushare SW classify sources to compare")
     parser.add_argument("--top-k", type=int, default=3, help="Candidate rows to keep per V8 code/date/src")
     parser.add_argument("--replace", action="store_true", help="Delete existing crosswalk rows in the target date range before insert")
+    parser.add_argument(
+        "--v8-local-scope",
+        choices=["compat", "full"],
+        default="compat",
+        help=(
+            "Which V8 LOCAL_FINE universe to compare against SW L1. "
+            "'compat' keeps the legacy 85%%.SI subset; 'full' uses all LOCAL_FINE "
+            "rows from map_hist L3."
+        ),
+    )
+    parser.add_argument(
+        "--allow-full-db-write",
+        action="store_true",
+        help=(
+            "Allow --v8-local-scope full results to be written into "
+            "cn_v7_v8_industry_crosswalk. By default full-scope runs are "
+            "report-only to avoid mixing compatibility and full-universe semantics "
+            "in the same history table."
+        ),
+    )
     parser.add_argument(
         "--source-mode",
         choices=["db", "tushare"],
@@ -80,10 +106,25 @@ def _fetch_effective_dates(engine, start: date, end: date) -> list[date]:
     raise SystemExit("No usable monthly trading dates found in cn_index_daily_price for the requested range.")
 
 
-def _fetch_v8_local_rows(engine, start: date, end: date) -> pd.DataFrame:
+def _scope_filter(scope: str) -> tuple[str, str]:
+    if scope == "full":
+        return "", "full LOCAL_FINE universe"
+    return "AND industry_id LIKE :industry_pattern", "compatibility subset (85%.SI)"
+
+
+def _fetch_v8_local_rows(engine, start: date, end: date, scope: str) -> pd.DataFrame:
+    """Load V8 local-industry memberships for the compatibility crosswalk.
+
+    Under the current V8 semantic contract:
+    - `cn_local_industry_map_hist.industry_level = 'L3'` is the LOCAL_FINE
+      391-industry production layer
+    - this builder can consume either the legacy compatibility subset or the
+      full LOCAL_FINE universe
+    """
+    extra_filter, scope_label = _scope_filter(scope)
     frame = fetch_df(
         engine,
-        """
+        f"""
         SELECT
             symbol,
             industry_id,
@@ -92,7 +133,8 @@ def _fetch_v8_local_rows(engine, start: date, end: date) -> pd.DataFrame:
             in_date,
             out_date
         FROM cn_local_industry_map_hist
-        WHERE industry_id LIKE :industry_pattern
+        WHERE industry_level = 'L3'
+          {extra_filter}
           AND in_date <= :end
           AND (out_date IS NULL OR out_date >= :start)
         ORDER BY industry_id, symbol, in_date
@@ -100,7 +142,10 @@ def _fetch_v8_local_rows(engine, start: date, end: date) -> pd.DataFrame:
         {"industry_pattern": V8_LOCAL_PATTERN, "start": start, "end": end},
     )
     if frame.empty:
-        raise SystemExit("No V8 local industry rows found in cn_local_industry_map_hist for 85xxxx.SI in the requested range.")
+        raise SystemExit(
+            "No V8 LOCAL_FINE rows found in cn_local_industry_map_hist "
+            f"for scope={scope} ({scope_label}) in the requested range."
+        )
     frame["symbol"] = frame["symbol"].map(_normalize_symbol)
     frame["in_date"] = pd.to_datetime(frame["in_date"], errors="coerce").dt.date
     frame["out_date"] = pd.to_datetime(frame["out_date"], errors="coerce").dt.date
@@ -394,6 +439,7 @@ def _write_report(best_frame: pd.DataFrame, candidate_frame: pd.DataFrame, outpu
         f"- end: `{args.end or 'today'}`",
         f"- srcs: `{', '.join(args.srcs)}`",
         f"- top_k: `{args.top_k}`",
+        f"- v8_local_scope: `{args.v8_local_scope}`",
         "",
         "## Summary",
         "",
@@ -443,10 +489,18 @@ def run(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("crosswalk_start start=%s end=%s srcs=%s top_k=%s replace=%s", date_range.start, date_range.end, args.srcs, args.top_k, args.replace)
+    logger.info(
+        "crosswalk_start start=%s end=%s srcs=%s top_k=%s replace=%s scope=%s",
+        date_range.start,
+        date_range.end,
+        args.srcs,
+        args.top_k,
+        args.replace,
+        args.v8_local_scope,
+    )
     effective_dates = _fetch_effective_dates(engine, date_range.start, date_range.end)
     logger.info("effective_dates count=%s first=%s last=%s", len(effective_dates), effective_dates[0], effective_dates[-1])
-    v8_frame = _fetch_v8_local_rows(engine, date_range.start, date_range.end)
+    v8_frame = _fetch_v8_local_rows(engine, date_range.start, date_range.end, args.v8_local_scope)
     v8_memberships, v8_meta = _active_memberships_by_date(
         v8_frame,
         effective_dates,
@@ -499,6 +553,16 @@ def run(args: argparse.Namespace) -> None:
     unmatched_frame.to_csv(output_dir / "v7_v8_industry_crosswalk_unmatched.csv", index=False, encoding="utf-8-sig")
     manual_frame.to_csv(output_dir / "v7_v8_industry_crosswalk_manual_review.csv", index=False, encoding="utf-8-sig")
     _write_report(best_frame, frame, output_dir, args)
+
+    if args.v8_local_scope == "full" and not args.allow_full_db_write:
+        logger.warning(
+            "crosswalk_skip_db_write scope=full allow_full_db_write=0 "
+            "output_dir=%s candidate_rows=%s best_rows=%s",
+            output_dir,
+            len(frame.index),
+            len(best_frame.index),
+        )
+        return
 
     if args.replace:
         with engine.begin() as conn:

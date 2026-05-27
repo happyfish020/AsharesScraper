@@ -167,10 +167,13 @@ def load_stock_daily_basic(engine: Engine, start: date, end: date) -> pd.DataFra
 
 def load_industry_map_hist(engine: Engine) -> pd.DataFrame:
     """Load cn_local_industry_map_hist for stock-to-industry mapping with date ranges.
-    
-    Includes both 'L1' (legacy, valid through 2026-03-31) and 'SW_L1' (current,
-    valid from 2026-04-01 onward) industry levels to ensure coverage across
-    the industry mapping transition period.
+
+    Under the current V8 semantic contract:
+    - map_hist `L3` = LOCAL_FINE (391-industry production set)
+    - map_hist `SW_L1` = official Shenwan L1 (31-industry coarse set)
+
+    This loader is used only as a fallback when the daily-expanded membership
+    map is unavailable, but it should still align to the same V8 semantics.
     """
     sql = """
     SELECT
@@ -181,7 +184,7 @@ def load_industry_map_hist(engine: Engine) -> pd.DataFrame:
         in_date,
         out_date
     FROM cn_local_industry_map_hist
-    WHERE industry_level IN ('L1', 'SW_L1')
+    WHERE industry_level IN ('L3', 'SW_L1')
     ORDER BY symbol, in_date
     """
     return fetch_df(engine, sql)

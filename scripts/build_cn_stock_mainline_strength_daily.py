@@ -190,14 +190,22 @@ def load_mainline_lifecycle(engine: Engine, start: date, end: date) -> pd.DataFr
 
 
 def load_industry_map_hist(engine: Engine) -> pd.DataFrame:
-    """Load cn_local_industry_map_hist for industry name mapping."""
+    """Load cn_local_industry_map_hist for industry name mapping.
+
+    Under the current V8 semantic contract:
+    - map_hist `L3` = LOCAL_FINE (391-industry production set)
+    - map_hist `SW_L1` = official Shenwan L1 (31-industry coarse set)
+
+    This builder is part of the V8 fine-grained production path, so it should
+    not require physical `industry_level = 'L1'` rows to exist in map_hist.
+    """
     sql = """
     SELECT DISTINCT
         industry_id,
         industry_name,
         industry_level
     FROM cn_local_industry_map_hist
-    WHERE industry_level = 'L1'
+    WHERE industry_level IN ('L3', 'SW_L1')
     """
     return fetch_df(engine, sql)
 

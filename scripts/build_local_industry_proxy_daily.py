@@ -95,11 +95,11 @@ base AS (
         p.amount,
         p.TURNOVER_RATE,
         p.stock_ret,
-        :industry_level AS industry_level
+        :output_level AS industry_level
     FROM price_chunk p
     STRAIGHT_JOIN cn_local_industry_map_hist m
         ON m.symbol = p.SYMBOL
-        AND m.industry_level = :industry_level
+        AND m.industry_level = :map_level
         AND p.TRADE_DATE >= m.in_date
         AND (m.out_date IS NULL OR p.TRADE_DATE <= m.out_date)
     LEFT JOIN cn_stock_daily_basic b
@@ -191,11 +191,11 @@ base AS (
         p.TURNOVER_RATE,
         p.stock_ret,
         ls.leader_score,
-        :industry_level AS industry_level
+        :output_level AS industry_level
     FROM price_chunk p
     STRAIGHT_JOIN cn_local_industry_map_hist m
         ON m.symbol = p.SYMBOL
-        AND m.industry_level = :industry_level
+        AND m.industry_level = :map_level
         AND p.TRADE_DATE >= m.in_date
         AND (m.out_date IS NULL OR p.TRADE_DATE <= m.out_date)
     LEFT JOIN cn_stock_daily_basic b
@@ -244,7 +244,7 @@ FROM cn_local_industry_proxy_daily t
 JOIN (
     SELECT DISTINCT industry_id
     FROM cn_local_industry_map_hist
-    WHERE industry_level = :industry_level
+    WHERE industry_level = :map_level
 ) ids
     ON ids.industry_id = t.industry_id
 WHERE t.trade_date BETWEEN :chunk_start AND :chunk_end
@@ -611,7 +611,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers (for future use)")
     parser.add_argument("--chunk-months", type=int, default=1, help="Month count per chunk")
     parser.add_argument("--chunk-days", type=int, default=0, help="Calendar day count per chunk; overrides --chunk-months when > 0")
-    parser.add_argument("--industry-level", default="L1", choices=["L1", "L2", "L3"], help="Industry level")
+    parser.add_argument(
+        "--industry-level",
+        default="L1",
+        choices=["L1", "L2", "L3"],
+        help=(
+            "Physical output level label. In current V8 semantics, output L1 is "
+            "the fine-grained LOCAL_FINE proxy layer built from map_hist L3 rows."
+        ),
+    )
     parser.add_argument("--use-leader-score", action="store_true", help="Use cn_stock_leader_score_daily for leader_return (auto-detected if available)")
     return parser
 
@@ -626,6 +634,28 @@ def main() -> None:
     use_leader_score = args.use_leader_score or check_leader_score_table(engine)
     normalize_source_symbol_columns(engine, use_leader_score, logger)
     ensure_hot_path_indexes(engine, use_leader_score, logger)
+
+    # Resolve industry level mapping.
+    #
+    # Current V8 semantic contract:
+    #   - map_hist 'L3' is the membership source for the 391-industry LOCAL_FINE
+    #     production set
+    #   - map_hist 'SW_L1' is the official 31-industry Shenwan L1 set
+    #   - proxy_daily stores LOCAL_FINE using the legacy physical label 'L1'
+    #
+    # Therefore, when --industry-level L1 is requested, we intentionally query
+    # map_hist using 'L3' but write 'L1' to the output table for backward
+    # compatibility with the current physical schema.
+    output_level = args.industry_level
+    if args.industry_level == "L1":
+        map_level = "L3"
+        logger.info(
+            "Industry level mapping: output=%s map_hist_query=%s "
+            "(cn_local_industry_map_hist has no 'L1' records; L1 proxy data is built from L3 map_hist)",
+            output_level, map_level,
+        )
+    else:
+        map_level = args.industry_level
     audit_source_data_coverage(engine, date_range.start, date_range.end, logger, use_leader_score)
 
     # Ensure DDL — use CREATE TABLE IF NOT EXISTS for initial creation,
@@ -814,10 +844,40 @@ def main() -> None:
 
         try:
             with engine.begin() as conn:
+                # Step 1: Check if source data exists before deleting
+                source_check = conn.execute(
+                    text("""
+                        SELECT COUNT(DISTINCT p.SYMBOL) AS cnt
+                        FROM cn_stock_daily_price p
+                        STRAIGHT_JOIN cn_local_industry_map_hist m
+                            ON m.symbol = p.SYMBOL
+                            AND m.industry_level = :map_level
+                            AND p.TRADE_DATE >= m.in_date
+                            AND (m.out_date IS NULL OR p.TRADE_DATE <= m.out_date)
+                        WHERE p.TRADE_DATE BETWEEN :chunk_start AND :chunk_end
+                        LIMIT 1
+                    """),
+                    {
+                        "map_level": map_level,
+                        "chunk_start": chunk_start,
+                        "chunk_end": chunk_end,
+                    },
+                ).scalar()
+                source_count = int(source_check or 0)
+
+                if source_count == 0 and not args.force:
+                    # No source data found for this chunk — skip delete to preserve existing rows
+                    logger.warning(
+                        "[%s/%s] skip_chunk_no_source chunk=%s — no matching stock_price+map_hist rows found",
+                        chunk_idx, len(chunks), chunk_key,
+                    )
+                    state.complete(chunk_key, 0)
+                    continue
+
                 conn.execute(
                     text(DELETE_CHUNK_SQL),
                     {
-                        "industry_level": args.industry_level,
+                        "map_level": map_level,
                         "chunk_start": chunk_start,
                         "chunk_end": chunk_end,
                     },
@@ -825,7 +885,8 @@ def main() -> None:
                 result = conn.execute(
                     text(agg_sql),
                     {
-                        "industry_level": args.industry_level,
+                        "map_level": map_level,
+                        "output_level": output_level,
                         "chunk_start": chunk_start,
                         "chunk_end": chunk_end,
                     },

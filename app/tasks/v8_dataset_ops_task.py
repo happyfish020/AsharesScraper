@@ -671,6 +671,10 @@ class _V8OpsMixin:
         chunk_medium = str(_env_int("V8_DERIVED_CHUNK_MONTHS_MEDIUM", 3))
         validate_min_rows = str(_env_int("V8_DERIVED_VALIDATE_MIN_ROWS", 1))
 
+        if _env_flag("V8_SKIP_UNIFIED_ALPHA", False):
+            ctx.log.info("[V8] V8_SKIP_UNIFIED_ALPHA=1; skipped build_unified_alpha_score_daily.py")
+            return
+
         self._run_python_script(
             ctx,
             "scripts/build_unified_alpha_score_daily.py",

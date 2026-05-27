@@ -84,10 +84,18 @@ This document describes every table involved in the **P0 Mainline Data Foundatio
 |--------|-------------|
 | **Purpose** | Historical industry membership mapping: which stock belonged to which industry on which dates. Tracks `in_date` / `out_date` for each membership. |
 | **Source** | Built by [`build_local_industry_map_hist.py`](scripts/build_local_industry_map_hist.py) from Tushare `index_member_all` API + existing `cn_board_member_map_d` |
-| **Key Columns** | `symbol`, `industry_id`, `industry_name`, `industry_level` (L1/L2/L3), `in_date`, `out_date`, `is_manual_override`, `source` |
+| **Key Columns** | `symbol`, `industry_id`, `industry_name`, `industry_level`, `in_date`, `out_date`, `is_manual_override`, `source` |
 | **PK** | `(symbol, industry_id, in_date)` |
 | **Collation** | `utf8mb4_unicode_ci` |
 | **Used By** | [`build_local_industry_proxy_daily.py`](scripts/build_local_industry_proxy_daily.py) — JOINs on `symbol` + date range to determine which stocks belong to each industry on each trade date |
+
+Current V8 semantic note:
+
+- `industry_level = 'L3'` is currently the membership source for the 391-industry
+  fine-grained V8 production set (`LOCAL_FINE`)
+- `industry_level = 'SW_L1'` is the official Shenwan 2021 level-1 membership set
+- V8 should not assume that physical `industry_level = 'L1'` rows exist in this
+  table for the fine-grained production path
 
 ### [`cn_local_industry_master`](data_pipeline/builders/sw_industry_master.py:1)
 | Aspect | Description |
@@ -166,11 +174,24 @@ This document describes every table involved in the **P0 Mainline Data Foundatio
 | | `market_cap_total` — total market cap (sum of all constituent market caps) |
 | | `leader_return` — return of the top leader stock (by leader_score or top-5 return avg) |
 | | `top5_concentration` — top-5 market cap / total market cap ratio |
-| | `industry_level` — L1/L2/L3 |
+| | `industry_level` — legacy storage label; see semantic note below |
 | | `source` — always `'local_proxy_from_stock_daily'` |
 | **PK** | `(industry_id, trade_date)` |
 | **Collation** | `utf8mb4_unicode_ci` |
 | **Used By** | Downstream GA-layer tables (radar, pulse, strength) |
+
+Current V8 semantic note:
+
+- `industry_level = 'L1'` currently means the 391-industry fine-grained V8
+  production set (`LOCAL_FINE`), not official Shenwan level-1
+- `industry_level = 'SW_L1'` keeps its literal meaning and refers to the
+  31-industry official Shenwan 2021 level-1 set
+- the `LOCAL_FINE` proxy rows are currently built from
+  `cn_local_industry_map_hist.industry_level = 'L3'`
+
+See also:
+
+- [V8_LOCAL_INDUSTRY_SEMANTICS_CONTRACT_20260525.md](./V8_LOCAL_INDUSTRY_SEMANTICS_CONTRACT_20260525.md)
 
 ### [`cn_industry_capital_flow_daily`](data_pipeline/builders/industry_capital_flow.py)
 | Aspect | Description |

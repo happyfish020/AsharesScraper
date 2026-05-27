@@ -13,14 +13,14 @@ Generates:
   - source, updated_at
 
 Supports:
-  - SW L1 (default), L2, L3
+  - SW L1, L2, L3 (`L3` is the current V8 LOCAL_FINE default)
   - --start / --end date range
   - --resume (skip completed chunks)
   - --force (reprocess even if completed)
   - Avoids future function: in_date/out_date from Tushare are historical facts
 
 Usage:
-  python scripts/build_local_industry_map_hist.py --start 2010-01-01 --end 2026-03-31 --level L1 --resume
+  python scripts/build_local_industry_map_hist.py --start 2010-01-01 --end 2026-03-31 --level L3 --resume
 """
 
 from __future__ import annotations
@@ -461,7 +461,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--start", default="2010-01-01", help="Start date YYYY-MM-DD or YYYYMMDD")
     parser.add_argument("--end", default="", help="End date YYYY-MM-DD or YYYYMMDD (default: today)")
-    parser.add_argument("--level", default="L1", choices=["L1", "L2", "L3"], help="Industry level")
+    parser.add_argument(
+        "--level",
+        default="L3",
+        choices=["L1", "L2", "L3"],
+        help="Industry level. Current V8 LOCAL_FINE production default is L3.",
+    )
     parser.add_argument("--resume", action="store_true", help="Skip completed chunks")
     parser.add_argument("--force", action="store_true", help="Force reprocess even if completed")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers for Tushare fetch")

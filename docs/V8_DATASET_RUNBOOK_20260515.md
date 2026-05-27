@@ -22,6 +22,7 @@ The unified entrypoints are:
 For the current future-system production update contract, also see:
 
 - [V8_FUTURE_SYSTEM_UPDATE_RUNBOOK_20260521.md](./V8_FUTURE_SYSTEM_UPDATE_RUNBOOK_20260521.md)
+- [V8_LOCAL_FINE_LATEST_DAY_RECOVERY_20260525.md](./V8_LOCAL_FINE_LATEST_DAY_RECOVERY_20260525.md)
 
 Important:
 
@@ -97,6 +98,31 @@ independent sub-tasks:
 This hook is disabled by default. It is intended for research acceptance,
 not for hard production freshness gating.
 
+### Industry semantics for V8
+
+V8 production should be interpreted using the semantics contract in
+[V8_LOCAL_INDUSTRY_SEMANTICS_CONTRACT_20260525.md](./V8_LOCAL_INDUSTRY_SEMANTICS_CONTRACT_20260525.md).
+
+Short version:
+
+- `SW_L1` means official Shenwan 2021 level-1 industries (31 industries)
+- the fine-grained V8 production industry set currently has 391 industries
+- today that fine-grained set is physically stored as:
+  - `cn_local_industry_map_hist.industry_level = 'L3'`
+  - `cn_local_industry_proxy_daily.industry_level = 'L1'`
+- that `proxy_daily.L1` label is legacy storage only; semantically it is the
+  V8 `LOCAL_FINE` production layer, not official SW level-1
+
+Operational rule:
+
+- for V8 mainline production, treat `cn_local_industry_proxy_daily` as the
+  primary daily industry source
+- treat `cn_local_industry_map_hist` as the membership source used to build it
+- do not require official `sw_daily` as the sole primary industry source under
+  the current 2000-point Tushare operating constraint
+- `scripts/build_local_industry_map_hist.py` now defaults to `--level L3`
+  because `L3` is the current V8 `LOCAL_FINE` production layer
+
 ## 2. Unified Task Entry Points
 
 ### Daily
@@ -110,6 +136,22 @@ Current production wrapper:
 ```bat
 daily_spot_update.bat
 ```
+
+Operator note:
+
+- after the daily task chain succeeds, `daily_spot_update.bat` runs
+  a recent-window `cn_local_industry_map_hist --level L3` refresh and then runs
+  `scripts/ensure_daily_market_mainline_signal_states.py`
+- that guard now resolves the latest **buildable** mainline-signal date, not
+  simply the latest raw stock/index trade date
+- in practice it is bounded by the minimum of:
+  - latest `cn_stock_daily_price`
+  - latest `cn_index_daily_price`
+  - latest `cn_stock_daily_basic`
+  - latest `cn_local_industry_map_hist` `LOCAL_FINE` horizon
+    (`industry_level = 'L3'`)
+- this avoids false failures when raw market tables are ahead of
+  `cn_stock_daily_basic` or the static `LOCAL_FINE` membership refresh
 
 Default daily chain:
 

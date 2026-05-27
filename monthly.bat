@@ -54,9 +54,17 @@ set "V8_MONTHLY_REPAIR_MAX_LOOKBACK_DAYS=1095"
 set "V8_MONTHLY_INCLUDE_DERIVED_REFRESH=1"
 set "V8_MONTHLY_INCLUDE_VALIDATIONS=1"
 set "V8_MONTHLY_INCLUDE_CROSSWALK_LATEST=0"
+if "%V8_MONTHLY_INCLUDE_ALPHA%"=="" set "V8_MONTHLY_INCLUDE_ALPHA=1"
+if "%V8_MONTHLY_MAP_LOOKBACK_DAYS%"=="" set "V8_MONTHLY_MAP_LOOKBACK_DAYS=365"
+if "%V8_MONTHLY_FULL_MAP_HIST%"=="" set "V8_MONTHLY_FULL_MAP_HIST=0"
 if "%V8_ENABLE_CROSSWALK_LATEST%"=="" set "V8_ENABLE_CROSSWALK_LATEST=0"
 
 cd /d "%WORKDIR%"
+
+for /f %%D in ('powershell -NoProfile -Command "(Get-Date).ToString('yyyy-MM-dd')"') do set "END_DATE=%%D"
+for /f %%D in ('powershell -NoProfile -Command "(Get-Date).AddDays(-%V8_MONTHLY_MAP_LOOKBACK_DAYS%).ToString('yyyy-MM-dd')"') do set "MAP_START_DATE=%%D"
+if "%V8_MONTHLY_FULL_MAP_HIST%"=="1" set "MAP_START_DATE=1990-01-01"
+if "%V8_MONTHLY_FULL_MAP_HIST%"=="1" set "END_DATE=2026-12-31"
 
 for %%T in (v8_monthly_refresh v8_monthly_audit v8_monthly_derived) do (
     echo [MONTHLY] %%T %EXTRA_ARGS%
@@ -64,21 +72,21 @@ for %%T in (v8_monthly_refresh v8_monthly_audit v8_monthly_derived) do (
     if errorlevel 1 goto :fail
 )
 
-echo [MONTHLY] build_local_industry_map_hist (L1)
-"%PYTHON_EXE%" "%WORKDIR%\\scripts\\build_local_industry_map_hist.py" --start 1990-01-01 --end 2026-12-31 --level L1 --resume
+echo [MONTHLY] build_local_industry_map_hist L1 window %MAP_START_DATE% to %END_DATE%
+"%PYTHON_EXE%" "%WORKDIR%\\scripts\\build_local_industry_map_hist.py" --start "%MAP_START_DATE%" --end "%END_DATE%" --level L1 --resume
 if errorlevel 1 goto :fail
 
-echo [MONTHLY] build_local_industry_map_hist (L2)
-"%PYTHON_EXE%" "%WORKDIR%\\scripts\\build_local_industry_map_hist.py" --start 1990-01-01 --end 2026-12-31 --level L2 --resume
+echo [MONTHLY] build_local_industry_map_hist L2 window %MAP_START_DATE% to %END_DATE%
+"%PYTHON_EXE%" "%WORKDIR%\\scripts\\build_local_industry_map_hist.py" --start "%MAP_START_DATE%" --end "%END_DATE%" --level L2 --resume
 if errorlevel 1 goto :fail
 
-echo [MONTHLY] build_local_industry_map_hist (L3)
-"%PYTHON_EXE%" "%WORKDIR%\\scripts\\build_local_industry_map_hist.py" --start 1990-01-01 --end 2026-12-31 --level L3 --resume
+echo [MONTHLY] build_local_industry_map_hist L3 window %MAP_START_DATE% to %END_DATE%
+"%PYTHON_EXE%" "%WORKDIR%\\scripts\\build_local_industry_map_hist.py" --start "%MAP_START_DATE%" --end "%END_DATE%" --level L3 --resume
 if errorlevel 1 goto :fail
 
 echo [MONTHLY] done
 exit /b 0
 
 :fail
-echo [MONTHLY] failed with exit code 0
-exit /b 0
+echo [MONTHLY] failed with exit code %ERRORLEVEL%
+exit /b %ERRORLEVEL%
