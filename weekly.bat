@@ -40,7 +40,7 @@ if "%SAW_REPLACE%"=="1" (
 if "%SAW_REPLACE%"=="1" if "%SAW_REFRESH%"=="0" (
     set "EXTRA_ARGS=%EXTRA_ARGS% --refresh"
 )
-if "%EXTRA_ARGS%"=="" set "EXTRA_ARGS=--asof latest --days 7"
+if "%EXTRA_ARGS%"=="" set "EXTRA_ARGS=--asof latest --days 20"
 
 
 rem Shared Tushare transport defaults

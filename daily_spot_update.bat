@@ -143,4 +143,9 @@ echo [DAILY_UPDATE] Ensuring latest market/mainline signal states...
 "%PYTHON_EXE%" "%SCRIPT_DIR%scripts\ensure_daily_market_mainline_signal_states.py"
 if errorlevel 1 exit /b %errorlevel%
 
+
+
+cd D:\LHJ\PythonWS\MarketMon\GrowthAlpha_V7
+python D:\LHJ\PythonWS\MarketMon\GrowthAlpha_V7\scripts\run_daily_operational_report.py
+ 
 exit /b 0

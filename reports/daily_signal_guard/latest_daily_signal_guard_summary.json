@@ -1,10 +1,10 @@
 {
-  "generated_at": "2026-05-27T07:04:05",
-  "trade_date": "2026-05-26",
-  "start_date": "2026-04-27",
+  "generated_at": "2026-06-05T07:00:31",
+  "trade_date": "2026-06-04",
+  "start_date": "2026-05-06",
   "actions": {
     "cn_local_industry_proxy_daily": "exists:305",
-    "cn_ga_stock_role_map_daily": "exists:5184",
+    "cn_ga_stock_role_map_daily": "exists:5187",
     "cn_stock_mainline_strength_daily": "exists:31",
     "cn_ga_mainline_radar_daily": "exists:31",
     "cn_ga_market_pulse_daily": "exists:1",
@@ -12,7 +12,7 @@
   },
   "counts": {
     "cn_local_industry_proxy_daily": 305,
-    "cn_ga_stock_role_map_daily": 5184,
+    "cn_ga_stock_role_map_daily": 5187,
     "cn_stock_mainline_strength_daily": 31,
     "cn_ga_mainline_radar_daily": 31,
     "cn_ga_market_pulse_daily": 1,

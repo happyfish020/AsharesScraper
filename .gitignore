@@ -6,3 +6,7 @@ stat/
 logs/
 audit_reports/
 __init__.py
+reports/
+reports/
+reports/daily_signal_guard/
+config/config.json
