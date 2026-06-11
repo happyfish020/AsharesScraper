@@ -20,6 +20,7 @@ from app.us_scraper.datasources.finra_margin_source import FinraMarginDebtSource
 from app.us_scraper.datasources.fred_source import FREDSeriesSource
 from app.us_scraper.datasources.gdelt_risk_source import GDELTRiskSource
 from app.us_scraper.datasources.tushare_pro_source import global_index_source, us_equity_or_etf_source
+from app.us_scraper.datasources.yahoo_price_source import global_index_fallback_source, us_equity_or_etf_fallback_source
 from app.us_scraper.datasources.vix_term_structure_source import VIXTermStructureSource
 from app.us_scraper.datasources.wikipedia_pageviews_source import WikipediaPageviewsRiskSource
 from app.us_scraper.db_loader import upsert_csv_to_mysql
@@ -1367,43 +1368,43 @@ def _project_root() -> Path:
 def build_source(name: str, *, config_path: str = "") -> BaseDataSource:
     key = name.lower().strip()
     if key == "spx":
-        return global_index_source(".SPX", name="spx", config_path=config_path)
+        return global_index_fallback_source(".SPX", name="spx", yahoo_symbol="^GSPC", config_path=config_path)
     if key == "spy":
-        return us_equity_or_etf_source("SPY", name="spy", config_path=config_path)
+        return us_equity_or_etf_fallback_source("SPY", name="spy", config_path=config_path)
     if key == "qqq":
-        return us_equity_or_etf_source("QQQ", name="qqq", config_path=config_path)
+        return us_equity_or_etf_fallback_source("QQQ", name="qqq", config_path=config_path)
     if key == "hyg":
-        return us_equity_or_etf_source("HYG", name="hyg", config_path=config_path)
+        return us_equity_or_etf_fallback_source("HYG", name="hyg", config_path=config_path)
     if key == "lqd":
-        return us_equity_or_etf_source("LQD", name="lqd", config_path=config_path)
+        return us_equity_or_etf_fallback_source("LQD", name="lqd", config_path=config_path)
     if key == "xlu":
-        return us_equity_or_etf_source("XLU", name="xlu", config_path=config_path)
+        return us_equity_or_etf_fallback_source("XLU", name="xlu", config_path=config_path)
     if key == "xlp":
-        return us_equity_or_etf_source("XLP", name="xlp", config_path=config_path)
+        return us_equity_or_etf_fallback_source("XLP", name="xlp", config_path=config_path)
     if key == "soxx":
-        return us_equity_or_etf_source("SOXX", name="soxx", config_path=config_path)
+        return us_equity_or_etf_fallback_source("SOXX", name="soxx", config_path=config_path)
     if key == "tlt":
-        return us_equity_or_etf_source("TLT", name="tlt", config_path=config_path)
+        return us_equity_or_etf_fallback_source("TLT", name="tlt", config_path=config_path)
     if key == "ief":
-        return us_equity_or_etf_source("IEF", name="ief", config_path=config_path)
+        return us_equity_or_etf_fallback_source("IEF", name="ief", config_path=config_path)
     if key == "iwm":
-        return us_equity_or_etf_source("IWM", name="iwm", config_path=config_path)
+        return us_equity_or_etf_fallback_source("IWM", name="iwm", config_path=config_path)
     if key == "rut":
-        return global_index_source(".RUT", name="russell_2000", config_path=config_path)
+        return global_index_fallback_source(".RUT", name="russell_2000", yahoo_symbol="^RUT", config_path=config_path)
     if key == "gdx":
-        return us_equity_or_etf_source("GDX", name="gdx", config_path=config_path)
+        return us_equity_or_etf_fallback_source("GDX", name="gdx", config_path=config_path)
     if key == "gld":
-        return us_equity_or_etf_source("GLD", name="gld", config_path=config_path)
+        return us_equity_or_etf_fallback_source("GLD", name="gld", config_path=config_path)
     if key == "ibb":
-        return us_equity_or_etf_source("IBB", name="ibb", config_path=config_path)
+        return us_equity_or_etf_fallback_source("IBB", name="ibb", config_path=config_path)
     if key == "xbi":
-        return us_equity_or_etf_source("XBI", name="xbi", config_path=config_path)
+        return us_equity_or_etf_fallback_source("XBI", name="xbi", config_path=config_path)
     if key.startswith("us:"):
         symbol = key.split(":", 1)[1]
-        return us_equity_or_etf_source(symbol, name=symbol.lower(), config_path=config_path)
+        return us_equity_or_etf_fallback_source(symbol, name=symbol.lower(), config_path=config_path)
     if key.startswith("idx:"):
         symbol = key.split(":", 1)[1]
-        return global_index_source(symbol, name=symbol.lower().replace(".", "_"), config_path=config_path)
+        return global_index_fallback_source(symbol, name=symbol.lower().replace(".", "_"), config_path=config_path)
     if key == "vix":
         return CBOEVIXSource()
     if key == "vix_term":
@@ -1418,9 +1419,9 @@ def build_source(name: str, *, config_path: str = "") -> BaseDataSource:
         return FinraMarginDebtSource(name="margin_debt")
     if key in FRED_DISABLED_SOURCES:
         if key in {"ust10", "us10y", "dgs10"}:
-            return us_equity_or_etf_source("IEF", name="ust10_proxy_ief", config_path=config_path)
+            return us_equity_or_etf_fallback_source("IEF", name="ust10_proxy_ief", config_path=config_path)
         if key in {"ust30", "us30y", "dgs30"}:
-            return us_equity_or_etf_source("TLT", name="ust30_proxy_tlt", config_path=config_path)
+            return us_equity_or_etf_fallback_source("TLT", name="ust30_proxy_tlt", config_path=config_path)
         raise ValueError(
             f"FRED source '{name}' is disabled for daily AshareScraper runs because FRED is not reliable in this environment. "
             "Use practical ETF proxies instead: ief/tlt, or explicit ust10/ust30 aliases for ust10_proxy_ief/ust30_proxy_tlt."
