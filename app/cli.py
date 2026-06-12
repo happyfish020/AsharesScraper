@@ -32,6 +32,7 @@ from app.tasks.stock_fundamental_monthly_task import StockFundamentalMonthlyTask
 from app.tasks.stock_quality_snapshot_task import StockQualitySnapshotTask
 from app.tasks.stock_working_capital_alert_task import StockWorkingCapitalAlertTask
 from app.tasks.inst_fund_hold_summary_task import InstFundHoldSummaryTask
+from app.tasks.gcrl_cn_public_fund_task import GcrlCnPublicFundTask
 from app.tasks.event_loader_task import EventLoaderTask
 from app.tasks.sw_industry_daily_task import SwIndustryDailyTask
 from app.us_scraper.runner import USGlobalScraperTask
@@ -77,7 +78,7 @@ def _parse_args(argv: Optional[List[str]] = None):
     p.add_argument("--start-date", "--start_date", dest="start_date", default=None, help="explicit inclusive start date: YYYYMMDD or YYYY-MM-DD. Overrides --days when supplied.")
     p.add_argument("--end-date", "--end_date", dest="end_date", default=None, help="explicit inclusive end date: latest, YYYYMMDD or YYYY-MM-DD. Defaults to --asof when omitted.")
     p.add_argument("--flag", default="tu", choices=["tu", "ak"], help="data source flag: tu=tushare (default), ak=akshare")
-    p.add_argument("--tasks", default="stock", help="comma-separated: stock,his_stocks,board,stock_basic,sw_industry,stock_fundamental,stock_quality_snapshot,stock_working_capital,inst_fund_hold,rotation,etf,index,futures,options,event,event_daily,event_periodic,audit,v8_stock,v8_index,v8_board_refresh,v8_stock_basic,v8_sw_industry_daily,v8_rotation,v8_rotation_audit,v8_rotation_repair,v8_event_daily,v8_event_periodic,v8_stock_fundamental_refresh,v8_daily,v8_daily_market_raw,v8_daily_reference,v8_daily_audit,v8_daily_derived_foundation,v8_daily_derived_mainline,v8_daily_derived_alpha,v8_weekly,v8_weekly_refresh,v8_weekly_audit,v8_weekly_audit_stock,v8_weekly_audit_index,v8_weekly_audit_market,v8_weekly_finalize,v8_monthly,v8_monthly_refresh,v8_monthly_audit,v8_monthly_derived,v8_backfill,us_global,all")
+    p.add_argument("--tasks", default="stock", help="comma-separated: stock,his_stocks,board,stock_basic,sw_industry,stock_fundamental,stock_quality_snapshot,stock_working_capital,inst_fund_hold,gcrl_cn_public_fund,rotation,etf,index,futures,options,event,event_daily,event_periodic,audit,v8_stock,v8_index,v8_board_refresh,v8_stock_basic,v8_sw_industry_daily,v8_rotation,v8_rotation_audit,v8_rotation_repair,v8_event_daily,v8_event_periodic,v8_stock_fundamental_refresh,v8_daily,v8_daily_market_raw,v8_daily_reference,v8_daily_audit,v8_daily_derived_foundation,v8_daily_derived_mainline,v8_daily_derived_alpha,v8_weekly,v8_weekly_refresh,v8_weekly_audit,v8_weekly_audit_stock,v8_weekly_audit_index,v8_weekly_audit_market,v8_weekly_finalize,v8_monthly,v8_monthly_refresh,v8_monthly_audit,v8_monthly_derived,v8_backfill,us_global,all")
     p.add_argument("--us-sources", default="", help="us_global only: comma-separated non-A-share/global sources; empty means daily set")
     p.add_argument("--us-refresh", action="store_true", help="us_global only: ignore previous US/global state and redownload selected window")
     p.add_argument("--us-years", type=int, default=1, help="us_global only: history years for --us-history-backfill when --us-start-date is omitted; default 1")
@@ -250,6 +251,7 @@ def run(argv: Optional[List[str]] = None) -> None:
         "stock_quality_snapshot": StockQualitySnapshotTask,
         "stock_working_capital": StockWorkingCapitalAlertTask,
         "inst_fund_hold": InstFundHoldSummaryTask,
+        "gcrl_cn_public_fund": GcrlCnPublicFundTask,
         "event": EventLoaderTask,
         "event_daily": lambda: EventLoaderTask(name="EventLoaderDaily", frequency_tag="daily"),
         "event_periodic": lambda: EventLoaderTask(name="EventLoaderPeriodic", frequency_tag="periodic"),
@@ -325,7 +327,7 @@ def run(argv: Optional[List[str]] = None) -> None:
     ctx = RunContext(config=cfg, engine=engine, log=log)
 
     # Preserve a stable execution order + rotation
-    order = ["us_global", "v8_backfill", "v8_stock", "v8_index", "v8_board_refresh", "v8_stock_basic", "v8_sw_industry_daily", "v8_rotation", "v8_rotation_audit", "v8_rotation_repair", "v8_event_daily", "v8_event_periodic", "v8_stock_fundamental_refresh", "v8_daily", "v8_daily_market_raw", "v8_daily_reference", "v8_daily_audit", "v8_daily_derived_foundation", "v8_daily_derived_mainline", "v8_daily_derived_alpha", "v8_weekly", "v8_weekly_refresh", "v8_weekly_audit", "v8_weekly_audit_stock", "v8_weekly_audit_index", "v8_weekly_audit_market", "v8_weekly_finalize", "v8_monthly", "v8_monthly_refresh", "v8_monthly_audit", "v8_monthly_derived", "his_stocks", "stock", "board", "stock_basic", "sw_industry", "stock_fundamental", "stock_quality_snapshot", "stock_working_capital", "inst_fund_hold", "rotation", "event", "event_daily", "event_periodic", "etf", "index", "futures", "options", "audit"]
+    order = ["us_global", "v8_backfill", "v8_stock", "v8_index", "v8_board_refresh", "v8_stock_basic", "v8_sw_industry_daily", "v8_rotation", "v8_rotation_audit", "v8_rotation_repair", "v8_event_daily", "v8_event_periodic", "v8_stock_fundamental_refresh", "v8_daily", "v8_daily_market_raw", "v8_daily_reference", "v8_daily_audit", "v8_daily_derived_foundation", "v8_daily_derived_mainline", "v8_daily_derived_alpha", "v8_weekly", "v8_weekly_refresh", "v8_weekly_audit", "v8_weekly_audit_stock", "v8_weekly_audit_index", "v8_weekly_audit_market", "v8_weekly_finalize", "v8_monthly", "v8_monthly_refresh", "v8_monthly_audit", "v8_monthly_derived", "his_stocks", "stock", "board", "stock_basic", "sw_industry", "stock_fundamental", "stock_quality_snapshot", "stock_working_capital", "inst_fund_hold", "gcrl_cn_public_fund", "rotation", "event", "event_daily", "event_periodic", "etf", "index", "futures", "options", "audit"]
     for name in order:
         if name in selected:
             tasks.append(tasks_map[name]())
