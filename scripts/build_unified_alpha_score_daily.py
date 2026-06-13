@@ -8,10 +8,10 @@ Computes cn_unified_alpha_score_daily by combining 8 alpha factors:
   2. growth_acceleration_score  — Growth acceleration (from cn_stock_quality_score_daily)
   3. mainline_strength_score    — Mainline (industry) strength (from cn_stock_mainline_strength_daily)
   4. capital_concentration_score — Capital concentration (from cn_industry_capital_flow_daily)
-  5. leader_dominance_score     — Leader dominance (from cn_ga_mainline_radar_daily)
+  5. leader_dominance_score     — Leader dominance (from cn_mainline_strength_fact_daily)
   6. trend_quality_score        — Trend quality (from cn_stock_daily_price)
   7. lifecycle_position_score   — Lifecycle position (from cn_mainline_lifecycle_daily)
-  8. risk_crowding_score        — Risk / crowding filter (from cn_ga_market_pulse_daily + cn_ga_mainline_radar_daily)
+  8. risk_crowding_score        — Risk / crowding filter (from cn_ga_market_pulse_daily + cn_mainline_strength_fact_daily)
 
 Final score = weighted average of 8 factors, with risk_crowding_score inverted
 (risk_adjusted = 1 - risk_crowding_score), clipped to [0, 1].
@@ -267,38 +267,52 @@ def load_stock_quality_scores(
 
 
 def load_mainline_strength(engine: Engine, start: date, end: date) -> pd.DataFrame:
-    """Load cn_stock_mainline_strength_daily for the date range (industry-level, no symbol)."""
-    sql = """
-        SELECT
-            trade_date,
-            industry_name,
-            mainline_strength_score
-        FROM cn_stock_mainline_strength_daily
-        WHERE trade_date BETWEEN :start AND :end
-    """
-    df = fetch_df(engine, sql, {"start": start, "end": end})
-    if not df.empty:
-        df["mainline_strength_score"] = df["mainline_strength_score"].apply(lambda x: _safe_float(x, 0.5))
-    return df
-
-
-def load_ga_mainline_radar(engine: Engine, start: date, end: date) -> pd.DataFrame:
-    """Load cn_ga_mainline_radar_daily for leader dominance data."""
+    """Load canonical fact-layer mainline strength keyed by trade_date + mainline_id."""
     sql = """
         SELECT
             trade_date,
             mainline_id,
             mainline_name,
-            leader_density,
-            new_high_ratio,
-            breakout_ratio,
-            rotation_rank,
-            trend_alignment_score
-        FROM cn_ga_mainline_radar_daily
+            mainline_strength_score
+        FROM cn_mainline_strength_fact_daily
         WHERE trade_date BETWEEN :start AND :end
     """
     df = fetch_df(engine, sql, {"start": start, "end": end})
     if not df.empty:
+        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+        df["mainline_strength_score"] = df["mainline_strength_score"].apply(lambda x: _safe_float(x, 0.5))
+    return df
+
+
+def load_mainline_strength_fact(engine: Engine, start: date, end: date) -> pd.DataFrame:
+    """Load cn_mainline_strength_fact_daily for leader/crowding inputs.
+
+    This replaces the legacy radar dependency. Output keeps the same columns
+    expected by downstream factor functions, but all values are derived from
+    the canonical fact table.
+    """
+    sql = """
+        SELECT
+            trade_date,
+            mainline_id,
+            mainline_name,
+            CASE
+              WHEN active_member_count > 0 THEN leader_count / active_member_count
+              ELSE leader_strength_score
+            END AS leader_density,
+            CASE
+              WHEN active_member_count > 0 THEN new_high_52w_count / active_member_count
+              ELSE 0
+            END AS new_high_ratio,
+            breakout_ratio,
+            rank_no AS rotation_rank,
+            trend_score AS trend_alignment_score
+        FROM cn_mainline_strength_fact_daily
+        WHERE trade_date BETWEEN :start AND :end
+    """
+    df = fetch_df(engine, sql, {"start": start, "end": end})
+    if not df.empty:
+        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
         for col in ["leader_density", "new_high_ratio", "breakout_ratio", "trend_alignment_score"]:
             if col in df.columns:
                 df[col] = df[col].apply(lambda x: _safe_float(x, 0.5))
@@ -421,13 +435,13 @@ def _compute_mainline_strength_score(
     Uses mainline_strength_score from cn_stock_mainline_strength_daily (industry-level).
     Stock gets the strength score of its mainline.
     """
-    # industry_name is resolved in run_build via role_lookup
-    industry_name = row.get("_mainline_name", "")
-    if not industry_name:
+    mainline_id = row.get("_mainline_id", "")
+    trade_date = row.get("trade_date")
+    if not mainline_id or trade_date is None:
         return 0.5
-    ms_row = ms_lookup.get(industry_name)
+    ms_row = ms_lookup.get((trade_date, mainline_id))
     if ms_row is not None:
-        return _clip_score(_safe_float(ms_row.get("mainline_strength_score"), 0.5))
+        return _clip_score(_safe_float(ms_row.get("mainline_strength_score"), 0.5) / 100.0)
     return 0.5
 
 
@@ -466,12 +480,12 @@ def _compute_capital_concentration_score(
 
 def _compute_leader_dominance_score(
     row: pd.Series,
-    radar_lookup: dict,
+    fact_lookup: dict,
     role_lookup: dict,
 ) -> float:
     """
     Factor 5: Leader Dominance Score.
-    Uses leader_density, new_high_ratio, breakout_ratio from cn_ga_mainline_radar_daily.
+    Uses leader_density, new_high_ratio, breakout_ratio derived from cn_mainline_strength_fact_daily.
     """
     sym_key = (row["trade_date"], row["symbol"])
     role_row = role_lookup.get(sym_key)
@@ -482,13 +496,13 @@ def _compute_leader_dominance_score(
     if mainline_id is None:
         return 0.5
 
-    radar_key = (row["trade_date"], mainline_id)
-    radar_row = radar_lookup.get(radar_key)
+    fact_key = (row["trade_date"], mainline_id)
+    fact_row = fact_lookup.get(fact_key)
 
-    if radar_row is not None:
-        leader_density = _safe_float(radar_row.get("leader_density"), 0.5)
-        new_high_ratio = _safe_float(radar_row.get("new_high_ratio"), 0.5)
-        breakout_ratio = _safe_float(radar_row.get("breakout_ratio"), 0.5)
+    if fact_row is not None:
+        leader_density = _safe_float(fact_row.get("leader_density"), 0.5)
+        new_high_ratio = _safe_float(fact_row.get("new_high_ratio"), 0.5)
+        breakout_ratio = _safe_float(fact_row.get("breakout_ratio"), 0.5)
 
         composite = (leader_density + new_high_ratio + breakout_ratio) / 3.0
         stock_role = role_row.get("stock_role", "") if role_row else ""
@@ -579,7 +593,7 @@ def _compute_lifecycle_position_score(
 
 def _compute_risk_crowding_score(
     row: pd.Series,
-    radar_lookup: dict,
+    fact_lookup: dict,
     pulse_lookup: dict,
     role_lookup: dict,
 ) -> float:
@@ -614,7 +628,7 @@ def _compute_risk_crowding_score(
 
     Uses:
     - cn_ga_market_pulse_daily: bullish_industry_ratio, bearish_industry_ratio, market_phase
-    - cn_ga_mainline_radar_daily: leader_density (crowding proxy)
+    - cn_mainline_strength_fact_daily: leader_density (crowding proxy)
     """
     sym_key = (row["trade_date"], row["symbol"])
     role_row = role_lookup.get(sym_key)
@@ -646,13 +660,13 @@ def _compute_risk_crowding_score(
         if market_phase in ("RISK_OFF", "CRISIS"):
             market_risk_score = min(1.0, market_risk_score + 0.2)
 
-    # Mainline-level crowding (from cn_ga_mainline_radar_daily)
+    # Mainline-level crowding (from cn_mainline_strength_fact_daily)
     mainline_crowding_score = 0.5
     if mainline_id is not None:
-        radar_key = (row["trade_date"], mainline_id)
-        radar_row = radar_lookup.get(radar_key)
-        if radar_row is not None:
-            leader_density = _safe_float(radar_row.get("leader_density"), 0.5)
+        fact_key = (row["trade_date"], mainline_id)
+        fact_row = fact_lookup.get(fact_key)
+        if fact_row is not None:
+            leader_density = _safe_float(fact_row.get("leader_density"), 0.5)
             # High leader_density (>0.7) indicates crowding -> higher risk
             if leader_density > 0.7:
                 mainline_crowding_score = 0.8
@@ -834,7 +848,7 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
     print(f"[{_ts()}] Loading source tables ...", flush=True)
     quality_df = _timed_load("stock_quality_scores", load_stock_quality_scores, engine, start, end)
     ms_df = _timed_load("mainline_strength", load_mainline_strength, engine, start, end)
-    radar_df = _timed_load("ga_mainline_radar", load_ga_mainline_radar, engine, start, end)
+    fact_df = _timed_load("mainline_strength_fact", load_mainline_strength_fact, engine, start, end)
     icf_df = _timed_load("industry_capital_flow", load_industry_capital_flow, engine, start, end)
     role_df = _timed_load("ga_stock_role_map", load_ga_stock_role_map, engine, start, end)
     price_df = _timed_load("cn_stock_daily_price", load_stock_daily_price, engine, start, end)
@@ -846,27 +860,27 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
     lookup_started_at = time.time()
     print(f"[{_ts()}] Building lookup maps ...", flush=True)
 
-    # Mainline strength lookup: industry_name -> row (industry-level)
-    ms_lookup: dict[str, dict] = {}
+    # Mainline strength lookup: (trade_date, mainline_id) -> row from canonical fact layer
+    ms_lookup: dict[tuple[date, str], dict] = {}
     if not ms_df.empty:
         total = len(ms_df)
         report_every = max(5000, total // 10 or 1)
         _ms_cols = list(ms_df.columns)
         for i, row in enumerate(ms_df.itertuples(index=False), 1):
-            ms_lookup[getattr(row, "industry_name")] = {col: getattr(row, col) for col in _ms_cols}
+            ms_lookup[(getattr(row, "trade_date"), getattr(row, "mainline_id"))] = {col: getattr(row, col) for col in _ms_cols}
             if i % report_every == 0 or i == total:
                 _progress_line("mainline strength lookup", i, total, lookup_started_at)
 
-    # Radar lookup: (trade_date, mainline_id) -> row
-    radar_lookup: dict[tuple[date, str], dict] = {}
-    if not radar_df.empty:
-        total = len(radar_df)
+    # Fact lookup: (trade_date, mainline_id) -> row
+    fact_lookup: dict[tuple[date, str], dict] = {}
+    if not fact_df.empty:
+        total = len(fact_df)
         report_every = max(5000, total // 10 or 1)
-        _radar_cols = list(radar_df.columns)
-        for i, row in enumerate(radar_df.itertuples(index=False), 1):
-            radar_lookup[(getattr(row, "trade_date"), getattr(row, "mainline_id"))] = {col: getattr(row, col) for col in _radar_cols}
+        _radar_cols = list(fact_df.columns)
+        for i, row in enumerate(fact_df.itertuples(index=False), 1):
+            fact_lookup[(getattr(row, "trade_date"), getattr(row, "mainline_id"))] = {col: getattr(row, col) for col in _radar_cols}
             if i % report_every == 0 or i == total:
-                _progress_line("radar lookup", i, total, lookup_started_at)
+                _progress_line("fact lookup", i, total, lookup_started_at)
 
     # Industry capital flow lookup: (trade_date, industry_id) -> row
     icf_lookup: dict[tuple[date, str], dict] = {}
@@ -982,11 +996,11 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
 
         # Resolve mainline_name from role if industry map doesn't have it
         if not mainline_name and mainline_id:
-            # Try to get mainline_name from radar lookup
-            radar_key = (trade_date, mainline_id)
-            radar_row = radar_lookup.get(radar_key)
-            if radar_row is not None:
-                mainline_name = str(radar_row.get("mainline_name", ""))
+            # Try to get mainline_name from fact lookup
+            fact_key = (trade_date, mainline_id)
+            fact_row = fact_lookup.get(fact_key)
+            if fact_row is not None:
+                mainline_name = str(fact_row.get("mainline_name", ""))
             # Try lifecycle lookup
             if not mainline_name:
                 lc_key = (trade_date, mainline_id)
@@ -1030,7 +1044,7 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
 
         # Factor 5: leader_dominance_score
         leader_dominance_score = _compute_leader_dominance_score(
-            _row, radar_lookup, role_lookup
+            _row, fact_lookup, role_lookup
         )
 
         # Factor 6: trend_quality_score
@@ -1041,7 +1055,7 @@ def run_build(args: argparse.Namespace) -> pd.DataFrame:
 
         # Factor 8: risk_crowding_score
         risk_crowding_score = _compute_risk_crowding_score(
-            _row, radar_lookup, pulse_lookup, role_lookup
+            _row, fact_lookup, pulse_lookup, role_lookup
         )
 
         # Fundamental risk flag
@@ -1386,7 +1400,7 @@ def _date_chunks(start: date, end: date, months: int) -> list[tuple[date, date]]
 REQUIRED_SOURCE_TABLES: list[dict[str, str]] = [
     {"table": "cn_stock_quality_score_daily", "date_col": "trade_date", "label": "stock_quality_scores"},
     {"table": "cn_stock_mainline_strength_daily", "date_col": "trade_date", "label": "mainline_strength"},
-    {"table": "cn_ga_mainline_radar_daily", "date_col": "trade_date", "label": "ga_mainline_radar"},
+    {"table": "cn_mainline_strength_fact_daily", "date_col": "trade_date", "label": "mainline_strength_fact"},
     {"table": "cn_ga_stock_role_map_daily", "date_col": "trade_date", "label": "ga_stock_role_map"},
     {"table": "cn_stock_daily_price", "date_col": "TRADE_DATE", "label": "cn_stock_daily_price"},
     {"table": "cn_ga_market_pulse_daily", "date_col": "trade_date", "label": "ga_market_pulse"},

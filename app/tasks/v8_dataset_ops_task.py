@@ -564,10 +564,13 @@ class _V8OpsMixin:
         validate_min_rows = str(_env_int("V8_DERIVED_VALIDATE_MIN_ROWS", 1))
 
         skip_mainline_strength = _env_flag("V8_SKIP_MAINLINE_STRENGTH", False)
+        skip_mainline_strength_fact = _env_flag("V8_SKIP_MAINLINE_STRENGTH_FACT", False)
         skip_mainline_radar = _env_flag("V8_SKIP_MAINLINE_RADAR", False)
         skip_market_pulse = _env_flag("V8_SKIP_MARKET_PULSE", False)
         skip_local_industry_proxy = _env_flag("V8_SKIP_LOCAL_INDUSTRY_PROXY", False)
         skip_mainline_lifecycle = _env_flag("V8_SKIP_MAINLINE_LIFECYCLE", False)
+        use_fact_lifecycle = _env_flag("V8_USE_FACT_LIFECYCLE", False)
+        run_fact_audit = _env_flag("V8_RUN_MAINLINE_STRENGTH_FACT_AUDIT", True)
 
         if not skip_mainline_strength:
             self._run_python_script(
@@ -577,6 +580,17 @@ class _V8OpsMixin:
             )
         else:
             ctx.log.info("[V8] V8_SKIP_MAINLINE_STRENGTH=1; skipped build_cn_stock_mainline_strength_daily.py (first pass)")
+
+        # Clean Fact Layer first: this table is independent from
+        # cn_ga_mainline_radar_daily and is the future GrowthAlpha source.
+        if not skip_mainline_strength_fact:
+            self._run_python_script(
+                ctx,
+                "scripts/build_cn_mainline_strength_fact_daily.py",
+                ["--start", start_iso, "--end", end_iso, "--replace", "--chunk-months", chunk_small] + db_args,
+            )
+        else:
+            ctx.log.info("[V8] V8_SKIP_MAINLINE_STRENGTH_FACT=1; skipped build_cn_mainline_strength_fact_daily.py (first pass)")
 
         if not skip_mainline_radar:
             self._run_python_script(
@@ -615,13 +629,20 @@ class _V8OpsMixin:
             ctx.log.info("[V8] V8_SKIP_LOCAL_INDUSTRY_PROXY=1; skipped build_local_industry_proxy_daily.py")
 
         if not skip_mainline_lifecycle:
-            self._run_python_script(
-                ctx,
-                "scripts/build_mainline_lifecycle_daily.py",
-                ["--start", start_iso, "--end", end_iso, "--replace", "--chunk-months", chunk_small] + db_args,
-            )
+            if use_fact_lifecycle:
+                self._run_python_script(
+                    ctx,
+                    "scripts/build_mainline_lifecycle_daily_from_fact.py",
+                    ["--start", start_iso, "--end", end_iso, "--replace"] + db_args,
+                )
+            else:
+                self._run_python_script(
+                    ctx,
+                    "scripts/build_mainline_lifecycle_daily.py",
+                    ["--start", start_iso, "--end", end_iso, "--replace", "--chunk-months", chunk_small] + db_args,
+                )
         else:
-            ctx.log.info("[V8] V8_SKIP_MAINLINE_LIFECYCLE=1; skipped build_mainline_lifecycle_daily.py")
+            ctx.log.info("[V8] V8_SKIP_MAINLINE_LIFECYCLE=1; skipped lifecycle builder")
 
         if include_validations and not skip_mainline_lifecycle:
             self._run_python_script(
@@ -645,6 +666,28 @@ class _V8OpsMixin:
                 "scripts/validate_cn_mainline_strength_daily.py",
                 ["--start", start_iso, "--end", end_iso, "--min-rows", validate_min_rows] + db_args,
             )
+
+        # Rebuild/validate Fact Layer again after lifecycle/stock-strength second pass.
+        if not skip_mainline_strength_fact:
+            self._run_python_script(
+                ctx,
+                "scripts/build_cn_mainline_strength_fact_daily.py",
+                ["--start", start_iso, "--end", end_iso, "--replace", "--chunk-months", chunk_small] + db_args,
+            )
+            if include_validations:
+                self._run_python_script(
+                    ctx,
+                    "scripts/validate_cn_mainline_strength_fact_daily.py",
+                    ["--start", start_iso, "--end", end_iso, "--min-rows", validate_min_rows] + db_args,
+                )
+                if run_fact_audit:
+                    self._run_python_script(
+                        ctx,
+                        "scripts/audit_cn_mainline_strength_fact_daily.py",
+                        ["--start", start_iso, "--end", end_iso, "--strict"] + db_args,
+                    )
+        else:
+            ctx.log.info("[V8] V8_SKIP_MAINLINE_STRENGTH_FACT=1; skipped build_cn_mainline_strength_fact_daily.py (second pass)")
 
         if not skip_mainline_radar:
             self._run_python_script(
